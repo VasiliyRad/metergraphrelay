@@ -1,4 +1,5 @@
 .superpowers/
+docs/superpowers/
 .env
 *.jsonl
 __pycache__/
