@@ -104,7 +104,7 @@ def test_export_traces_empty_list_writes_empty_file(tmp_path):
     assert output_path.read_text() == ""
 
 
-def test_export_traces_marks_message_fetch_failure_as_error(tmp_path):
+def test_export_traces_marks_message_fetch_failure_as_error(tmp_path, capsys):
     client = MagicMock()
     completion = make_completion(id="chatcmpl-1", created=1780000000)
     client.chat.completions.list.return_value = [completion]
@@ -117,6 +117,43 @@ def test_export_traces_marks_message_fetch_failure_as_error(tmp_path):
     row = json.loads(output_path.read_text().splitlines()[0])
     assert row["status"] == "error"
     assert row["messages"] == []
+    captured = capsys.readouterr()
+    assert "chatcmpl-1" in captured.err
+    assert "boom" in captured.err
+
+
+class _FakeAutoPaginatingPage:
+    """Mimics a SyncCursorPage whose __iter__ keeps fetching beyond `limit`.
+
+    Iterating this object never stops on its own (it behaves like the real
+    OpenAI SDK page object, which auto-paginates past the requested page
+    size). Only bounding the iteration with something like itertools.islice
+    prevents it from exhausting the whole (simulated) account.
+    """
+
+    def __init__(self, total_items):
+        self._total_items = total_items
+
+    def __iter__(self):
+        i = 0
+        while i < self._total_items:
+            yield make_completion(id=f"chatcmpl-{i}", created=1780000000 + i)
+            i += 1
+
+
+def test_export_traces_does_not_paginate_past_count(tmp_path):
+    client = MagicMock()
+    # Simulate an account with far more completions than requested.
+    client.chat.completions.list.return_value = _FakeAutoPaginatingPage(total_items=100)
+    client.chat.completions.messages.list.return_value = []
+    output_path = tmp_path / "traces.jsonl"
+
+    written = export_traces(client, count=10, output_path=str(output_path))
+
+    client.chat.completions.list.assert_called_once_with(order="desc", limit=10)
+    assert written == 10
+    lines = output_path.read_text().splitlines()
+    assert len(lines) == 10
 
 
 def test_export_traces_echoes_to_stdout_when_enabled(tmp_path, capsys):

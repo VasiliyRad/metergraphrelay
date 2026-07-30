@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Any, Iterable
 
 
@@ -45,15 +47,21 @@ def normalize_completion(
 def export_traces(
     client: Any, count: int, output_path: str, *, echo_stdout: bool = False
 ) -> int:
-    completions = client.chat.completions.list(order="desc", limit=count)
+    page = client.chat.completions.list(order="desc", limit=count)
+    completions = list(islice(iter(page), count))
     written = 0
     with open(output_path, "w") as f:
         for completion in completions:
             try:
                 messages = client.chat.completions.messages.list(completion.id)
-                row = normalize_completion(completion, messages)
             except Exception as exc:
+                print(
+                    f"Warning: could not fetch messages for {completion.id}: {exc}",
+                    file=sys.stderr,
+                )
                 row = normalize_completion(completion, [], error=exc)
+            else:
+                row = normalize_completion(completion, messages)
             line = json.dumps(row)
             f.write(line + "\n")
             if echo_stdout:

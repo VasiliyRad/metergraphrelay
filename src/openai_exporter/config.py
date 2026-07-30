@@ -10,7 +10,7 @@ class ConfigError(Exception):
 
 
 def load_api_key(env_file: str = ".env") -> str:
-    load_dotenv(env_file)
+    load_dotenv(env_file, override=True)
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise ConfigError(
