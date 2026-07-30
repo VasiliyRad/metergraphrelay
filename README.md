@@ -3,6 +3,19 @@
 Export OpenAI stored chat completions as trace records, and optionally
 generate demo conversations to try it out.
 
+## Purpose
+
+Download the chat completions already stored in *your own* OpenAI
+account (completions created with `store=True`) as local JSONL trace
+records — useful for auditing, backups, or feeding into other tooling.
+This tool only reads what's associated with the API key you provide; it
+can't see or export anyone else's data.
+
+Built on OpenAI's [List Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/list),
+which returns completions that were created with `store: true`. See the
+[official OpenAI API reference](https://developers.openai.com/api/reference/chat-completions/overview)
+for the underlying data model.
+
 ## Setup
 
     pip install -e ".[dev]"
