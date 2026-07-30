@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Iterable
+
+
+def normalize_completion(
+    completion: Any, messages: Iterable[Any], error: Exception | None = None
+) -> dict:
+    usage = getattr(completion, "usage", None)
+    metadata = getattr(completion, "metadata", None) or {}
+    ts = datetime.fromtimestamp(completion.created, tz=timezone.utc).isoformat()
+
+    if error is not None:
+        return {
+            "id": completion.id,
+            "ts": ts,
+            "model": completion.model,
+            "provider": "openai",
+            "endpoint": "chat.completions",
+            "status": "error",
+            "input_tokens": None,
+            "output_tokens": None,
+            "messages": [],
+            "metadata": metadata,
+        }
+
+    return {
+        "id": completion.id,
+        "ts": ts,
+        "model": completion.model,
+        "provider": "openai",
+        "endpoint": "chat.completions",
+        "status": "success",
+        "input_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
+        "output_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+        "messages": [
+            {"role": message.role, "content": message.content} for message in messages
+        ],
+        "metadata": metadata,
+    }
