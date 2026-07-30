@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -39,3 +40,23 @@ def normalize_completion(
         ],
         "metadata": metadata,
     }
+
+
+def export_traces(
+    client: Any, count: int, output_path: str, *, echo_stdout: bool = False
+) -> int:
+    completions = client.chat.completions.list(order="desc", limit=count)
+    written = 0
+    with open(output_path, "w") as f:
+        for completion in completions:
+            try:
+                messages = client.chat.completions.messages.list(completion.id)
+                row = normalize_completion(completion, messages)
+            except Exception as exc:
+                row = normalize_completion(completion, [], error=exc)
+            line = json.dumps(row)
+            f.write(line + "\n")
+            if echo_stdout:
+                print(line)
+            written += 1
+    return written
