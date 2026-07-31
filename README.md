@@ -25,30 +25,39 @@ for the underlying data model.
 ## Usage
 
 Generate 1-2 demo conversations (stored with `store=True`) so there's
-data to export:
+data to pull:
 
-    metergraphrelay demo
+    metergraphrelay demo openai
 
-Export the 10 most recent stored chat completions to `traces.jsonl`:
+Pull the 10 most recent stored chat completions into `traces.jsonl`,
+already shaped as metergraph trace records:
 
-    metergraphrelay export
+    metergraphrelay pull openai
 
 Options:
 
-    metergraphrelay export -n 25 --output my-traces.jsonl --stdout
-    metergraphrelay demo --model gpt-4o-mini
+    metergraphrelay pull openai -n 25 --output my-traces.jsonl --stdout --include-content --route my-app/support-bot
+    metergraphrelay demo openai --model gpt-4o-mini
 
-Both subcommands accept `--env-file PATH` to point at a config file
+Push a local JSONL file of traces to metergraph:
+
+    metergraphrelay push traces.jsonl
+
+`pull anthropic` and `pull langfuse` accept the same shape but are not
+yet implemented in this version — they check for `ANTHROPIC_API_KEY` /
+`LANGFUSE_PUBLIC_KEY`+`LANGFUSE_SECRET_KEY` and report accordingly.
+
+All subcommands accept `--env-file PATH` to point at a config file
 other than `./.env`.
 
 ## Using it against your real system (not just the demo)
 
-`metergraphrelay export` only finds completions that were created with
-`store=True`. The `demo` subcommand sets that flag for you, but for your
-own application to show up in an export, its own OpenAI calls need the
-same flag. The only change required is adding `store=True` (and,
-optionally, `metadata` to help you tell requests apart later) to calls
-you're already making:
+`metergraphrelay pull openai` only finds completions that were created
+with `store=True`. The `demo openai` subcommand sets that flag for you,
+but for your own application to show up in a pull, its own OpenAI calls
+need the same flag. The only change required is adding `store=True`
+(and, optionally, `metadata` to help you tell requests apart later) to
+calls you're already making:
 
     from openai import OpenAI
 
@@ -57,13 +66,13 @@ you're already making:
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": "..."}],
-        store=True,                       # <-- persists this completion for later export
+        store=True,                       # <-- persists this completion for later pulling
         metadata={"source": "my-app"},    # optional: filter/identify later via the API
     )
 
 No other code changes are needed — the request and response are handled
 exactly as before. Once your app is sending `store=True`, its completions
-become visible to `metergraphrelay export` (or to the
+become visible to `metergraphrelay pull openai` (or to the
 [List Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/list)
 directly) using the same API key.
 
@@ -76,20 +85,29 @@ Two things worth knowing before flipping this on in production:
 
 ## Trace record shape
 
-Each line of the export output is a JSON object:
+Each line of `pull openai`'s output is a JSON object already shaped for
+metergraph's ingest API:
 
     {
-      "id": "chatcmpl-...",
       "ts": "2026-07-30T12:00:00+00:00",
-      "model": "gpt-4o-mini",
       "provider": "openai",
-      "endpoint": "chat.completions",
+      "model": "gpt-4o-mini",
       "status": "success",
+      "endpoint": "chat.completions",
       "input_tokens": 12,
       "output_tokens": 34,
-      "messages": [{"role": "user", "content": "..."}],
-      "metadata": {}
+      "request_id": "chatcmpl-...",
+      "tags": {},
+      "route": "openai/backfill",
+      "content_opted_in": false,
+      "request_json": null,
+      "response_text": null,
+      "sdk": "metergraphrelay",
+      "sdk_version": "0.1.0"
     }
+
+`request_json`/`response_text` are populated only when `--include-content`
+is passed.
 
 ## Running tests
 

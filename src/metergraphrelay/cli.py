@@ -1,58 +1,129 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from openai import OpenAI
 
-from .config import ConfigError, load_api_key
+from .config import ConfigError, require_credentials
 from .demo import run_demo
-from .export import export_traces
+from .providers.openai import pull_openai
+from .push import push_file
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="openai-exporter")
+    parser = argparse.ArgumentParser(prog="metergraphrelay")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    pull_parser = subparsers.add_parser(
+        "pull", help="Pull trace data from a provider into a local JSONL file"
+    )
+    pull_subparsers = pull_parser.add_subparsers(dest="provider", required=True)
+
+    pull_openai_parser = pull_subparsers.add_parser("openai")
+    pull_openai_parser.add_argument("-n", "--count", type=int, default=10)
+    pull_openai_parser.add_argument("--output", default="traces.jsonl")
+    pull_openai_parser.add_argument("--stdout", action="store_true")
+    pull_openai_parser.add_argument("--route", default="openai/backfill")
+    pull_openai_parser.add_argument("--include-content", action="store_true")
+    pull_openai_parser.add_argument("--env-file", default=".env")
+
+    pull_anthropic_parser = pull_subparsers.add_parser("anthropic")
+    pull_anthropic_parser.add_argument("-n", "--count", type=int, default=10)
+    pull_anthropic_parser.add_argument("--output", default="traces.jsonl")
+    pull_anthropic_parser.add_argument("--env-file", default=".env")
+
+    pull_langfuse_parser = pull_subparsers.add_parser("langfuse")
+    pull_langfuse_parser.add_argument("--output", default="traces.jsonl")
+    pull_langfuse_parser.add_argument("--env-file", default=".env")
 
     demo_parser = subparsers.add_parser(
         "demo", help="Run 1-2 demo conversations with store=True"
     )
-    demo_parser.add_argument("--model", default="gpt-4o-mini")
-    demo_parser.add_argument("--env-file", default=".env")
+    demo_subparsers = demo_parser.add_subparsers(dest="provider", required=True)
+    demo_openai_parser = demo_subparsers.add_parser("openai")
+    demo_openai_parser.add_argument("--model", default="gpt-4o-mini")
+    demo_openai_parser.add_argument("--env-file", default=".env")
 
-    export_parser = subparsers.add_parser(
-        "export", help="Export N stored chat completions as JSONL traces"
+    push_parser = subparsers.add_parser(
+        "push", help="Push a local JSONL file of traces to metergraph"
     )
-    export_parser.add_argument("-n", "--count", type=int, default=10)
-    export_parser.add_argument("--output", default="traces.jsonl")
-    export_parser.add_argument("--stdout", action="store_true")
-    export_parser.add_argument("--env-file", default=".env")
+    push_parser.add_argument("file")
+    push_parser.add_argument("--env-file", default=".env")
 
     return parser
+
+
+def _config_error(exc: ConfigError) -> int:
+    print(f"Error: {exc}", file=sys.stderr)
+    return 1
+
+
+def _not_implemented(provider: str) -> int:
+    print(
+        f"Error: pulling from {provider} is not implemented in this version.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    try:
-        api_key = load_api_key(args.env_file)
-    except ConfigError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    if args.command == "pull" and args.provider in {"anthropic", "langfuse"}:
+        try:
+            require_credentials(args.provider, args.env_file)
+        except ConfigError as exc:
+            return _config_error(exc)
+        return _not_implemented(args.provider)
 
-    client = OpenAI(api_key=api_key)
+    if args.command == "pull" and args.provider == "openai":
+        try:
+            creds = require_credentials("openai", args.env_file)
+        except ConfigError as exc:
+            return _config_error(exc)
+        client = OpenAI(api_key=creds["OPENAI_API_KEY"])
+        written = pull_openai(
+            client,
+            args.count,
+            args.output,
+            route=args.route,
+            include_content=args.include_content,
+            echo_stdout=args.stdout,
+        )
+        if written == 0:
+            print("No stored completions found. Try `metergraphrelay demo openai` first.")
+        else:
+            print(f"Wrote {written} trace(s) to {args.output}")
+        return 0
 
-    if args.command == "demo":
+    if args.command == "demo" and args.provider == "openai":
+        try:
+            creds = require_credentials("openai", args.env_file)
+        except ConfigError as exc:
+            return _config_error(exc)
+        client = OpenAI(api_key=creds["OPENAI_API_KEY"])
         run_demo(client, model=args.model)
         return 0
 
-    written = export_traces(client, args.count, args.output, echo_stdout=args.stdout)
-    if written == 0:
-        print("No stored completions found. Try `openai-exporter demo` first.")
-    else:
-        print(f"Wrote {written} trace(s) to {args.output}")
-    return 0
+    if args.command == "push":
+        try:
+            creds = require_credentials("push", args.env_file)
+        except ConfigError as exc:
+            return _config_error(exc)
+        base_url = os.environ.get("METERGRAPH_INGEST_URL")
+        succeeded, failed = push_file(
+            args.file, creds["METERGRAPH_APP_TOKEN"], base_url=base_url
+        )
+        if failed:
+            print(f"Pushed {succeeded} row(s), {failed} failed.", file=sys.stderr)
+            return 1
+        print(f"Pushed {succeeded} row(s) to metergraph.")
+        return 0
+
+    return 1
 
 
 if __name__ == "__main__":
