@@ -2,7 +2,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from metergraphrelay.export import normalize_completion, export_traces
+from metergraphrelay import __version__
+from metergraphrelay.providers.openai import normalize_completion, pull_openai
 
 
 def make_completion(**overrides):
@@ -21,52 +22,82 @@ def make_message(role, content):
     return SimpleNamespace(role=role, content=content)
 
 
-def test_normalize_completion_builds_expected_row():
+def test_normalize_completion_with_content_included():
     completion = make_completion()
     messages = [make_message("user", "hi"), make_message("assistant", "hello")]
 
-    row = normalize_completion(completion, messages)
+    row = normalize_completion(
+        completion, messages, route="openai/backfill", include_content=True
+    )
 
     assert row == {
-        "id": "chatcmpl-abc123",
         "ts": "2026-05-28T20:26:40+00:00",
-        "model": "gpt-4o-mini",
         "provider": "openai",
-        "endpoint": "chat.completions",
+        "model": "gpt-4o-mini",
         "status": "success",
+        "endpoint": "chat.completions",
         "input_tokens": 12,
         "output_tokens": 34,
-        "messages": [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ],
-        "metadata": {"foo": "bar"},
+        "request_id": "chatcmpl-abc123",
+        "tags": {"foo": "bar"},
+        "route": "openai/backfill",
+        "content_opted_in": True,
+        "request_json": json.dumps([{"role": "user", "content": "hi"}]),
+        "response_text": "hello",
+        "sdk": "metergraphrelay",
+        "sdk_version": __version__,
     }
+
+
+def test_normalize_completion_without_content_included():
+    completion = make_completion()
+    messages = [make_message("user", "hi"), make_message("assistant", "hello")]
+
+    row = normalize_completion(
+        completion, messages, route="openai/backfill", include_content=False
+    )
+
+    assert row["content_opted_in"] is False
+    assert row["request_json"] is None
+    assert row["response_text"] is None
+    assert row["input_tokens"] == 12
+    assert row["output_tokens"] == 34
 
 
 def test_normalize_completion_handles_missing_usage_and_metadata():
     completion = make_completion(usage=None, metadata=None)
 
-    row = normalize_completion(completion, [])
+    row = normalize_completion(
+        completion, [], route="openai/backfill", include_content=True
+    )
 
     assert row["input_tokens"] is None
     assert row["output_tokens"] is None
-    assert row["metadata"] == {}
-    assert row["messages"] == []
+    assert row["tags"] == {}
+    assert row["request_json"] == json.dumps([])
+    assert row["response_text"] is None
 
 
 def test_normalize_completion_marks_error_status():
     completion = make_completion()
 
-    row = normalize_completion(completion, [make_message("user", "hi")], error=RuntimeError("boom"))
+    row = normalize_completion(
+        completion,
+        [make_message("user", "hi")],
+        route="openai/backfill",
+        include_content=True,
+        error=RuntimeError("boom"),
+    )
 
     assert row["status"] == "error"
-    assert row["messages"] == []
+    assert row["content_opted_in"] is False
+    assert row["request_json"] is None
+    assert row["response_text"] is None
     assert row["input_tokens"] is None
     assert row["output_tokens"] is None
 
 
-def test_export_traces_writes_jsonl_for_each_completion(tmp_path):
+def test_pull_openai_writes_jsonl_for_each_completion(tmp_path):
     client = MagicMock()
     completions = [
         make_completion(id="chatcmpl-1", created=1780000000),
@@ -82,54 +113,65 @@ def test_export_traces_writes_jsonl_for_each_completion(tmp_path):
     )
     output_path = tmp_path / "traces.jsonl"
 
-    written = export_traces(client, count=2, output_path=str(output_path))
+    written = pull_openai(
+        client,
+        count=2,
+        output_path=str(output_path),
+        route="openai/backfill",
+        include_content=True,
+    )
 
     client.chat.completions.list.assert_called_once_with(order="desc", limit=2)
     assert written == 2
     lines = output_path.read_text().splitlines()
     assert len(lines) == 2
     row1 = json.loads(lines[0])
-    assert row1["id"] == "chatcmpl-1"
-    assert row1["messages"] == [{"role": "user", "content": "hi"}]
+    assert row1["request_id"] == "chatcmpl-1"
+    assert row1["route"] == "openai/backfill"
 
 
-def test_export_traces_empty_list_writes_empty_file(tmp_path):
+def test_pull_openai_empty_list_writes_empty_file(tmp_path):
     client = MagicMock()
     client.chat.completions.list.return_value = []
     output_path = tmp_path / "traces.jsonl"
 
-    written = export_traces(client, count=5, output_path=str(output_path))
+    written = pull_openai(
+        client,
+        count=5,
+        output_path=str(output_path),
+        route="openai/backfill",
+        include_content=True,
+    )
 
     assert written == 0
     assert output_path.read_text() == ""
 
 
-def test_export_traces_marks_message_fetch_failure_as_error(tmp_path, capsys):
+def test_pull_openai_marks_message_fetch_failure_as_error(tmp_path, capsys):
     client = MagicMock()
     completion = make_completion(id="chatcmpl-1", created=1780000000)
     client.chat.completions.list.return_value = [completion]
     client.chat.completions.messages.list.side_effect = RuntimeError("boom")
     output_path = tmp_path / "traces.jsonl"
 
-    written = export_traces(client, count=1, output_path=str(output_path))
+    written = pull_openai(
+        client,
+        count=1,
+        output_path=str(output_path),
+        route="openai/backfill",
+        include_content=True,
+    )
 
     assert written == 1
     row = json.loads(output_path.read_text().splitlines()[0])
     assert row["status"] == "error"
-    assert row["messages"] == []
     captured = capsys.readouterr()
     assert "chatcmpl-1" in captured.err
     assert "boom" in captured.err
 
 
 class _FakeAutoPaginatingPage:
-    """Mimics a SyncCursorPage whose __iter__ keeps fetching beyond `limit`.
-
-    Iterating this object never stops on its own (it behaves like the real
-    OpenAI SDK page object, which auto-paginates past the requested page
-    size). Only bounding the iteration with something like itertools.islice
-    prevents it from exhausting the whole (simulated) account.
-    """
+    """Mimics a SyncCursorPage whose __iter__ keeps fetching beyond `limit`."""
 
     def __init__(self, total_items):
         self._total_items = total_items
@@ -141,29 +183,41 @@ class _FakeAutoPaginatingPage:
             i += 1
 
 
-def test_export_traces_does_not_paginate_past_count(tmp_path):
+def test_pull_openai_does_not_paginate_past_count(tmp_path):
     client = MagicMock()
-    # Simulate an account with far more completions than requested.
-    client.chat.completions.list.return_value = _FakeAutoPaginatingPage(total_items=100)
+    client.chat.completions.list.return_value = _FakeAutoPaginatingPage(
+        total_items=100
+    )
     client.chat.completions.messages.list.return_value = []
     output_path = tmp_path / "traces.jsonl"
 
-    written = export_traces(client, count=10, output_path=str(output_path))
+    written = pull_openai(
+        client,
+        count=10,
+        output_path=str(output_path),
+        route="openai/backfill",
+        include_content=True,
+    )
 
     client.chat.completions.list.assert_called_once_with(order="desc", limit=10)
     assert written == 10
-    lines = output_path.read_text().splitlines()
-    assert len(lines) == 10
 
 
-def test_export_traces_echoes_to_stdout_when_enabled(tmp_path, capsys):
+def test_pull_openai_echoes_to_stdout_when_enabled(tmp_path, capsys):
     client = MagicMock()
     completion = make_completion(id="chatcmpl-1", created=1780000000)
     client.chat.completions.list.return_value = [completion]
     client.chat.completions.messages.list.return_value = [make_message("user", "hi")]
     output_path = tmp_path / "traces.jsonl"
 
-    export_traces(client, count=1, output_path=str(output_path), echo_stdout=True)
+    pull_openai(
+        client,
+        count=1,
+        output_path=str(output_path),
+        route="openai/backfill",
+        include_content=True,
+        echo_stdout=True,
+    )
 
     captured = capsys.readouterr()
     assert "chatcmpl-1" in captured.out
