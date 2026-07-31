@@ -78,6 +78,21 @@ def test_push_file_counts_http_error_and_continues(tmp_path, capsys):
     assert "401" in captured.err
 
 
+def test_push_file_counts_malformed_json_line_and_continues(tmp_path, capsys):
+    file_path = tmp_path / "traces.jsonl"
+    file_path.write_text('{"a": 1}\nnot json at all\n{"a": 2}\n')
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        succeeded, failed = push_file(str(file_path), token="tok-123")
+
+    assert succeeded == 2
+    assert failed == 1
+    assert mock_urlopen.call_count == 2
+    captured = capsys.readouterr()
+    assert "line 2" in captured.err
+
+
 def test_push_file_counts_url_error_and_continues(tmp_path, capsys):
     file_path = tmp_path / "traces.jsonl"
     file_path.write_text('{"a": 1}\n')

@@ -175,6 +175,48 @@ def test_main_push_returns_error_exit_code_when_any_row_fails(tmp_path):
     assert exit_code == 1
 
 
+def test_main_push_missing_input_file_returns_clean_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    missing_file = tmp_path / "nope.jsonl"
+
+    # Real push_file runs against a real missing path: no traceback should escape.
+    exit_code = main(["push", str(missing_file), "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: ")
+    assert "nope.jsonl" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_pull_openai_unwritable_output_returns_clean_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-test\n")
+
+    with patch("metergraphrelay.cli.OpenAI"), patch(
+        "metergraphrelay.cli.pull_openai",
+        side_effect=FileNotFoundError(
+            2, "No such file or directory", "/no/such/dir/t.jsonl"
+        ),
+    ):
+        exit_code = main(
+            [
+                "pull",
+                "openai",
+                "--env-file",
+                str(env_file),
+                "--output",
+                "/no/such/dir/t.jsonl",
+            ]
+        )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: ")
+    assert "/no/such/dir/t.jsonl" in captured.err
+
+
 def test_main_push_uses_custom_ingest_url_from_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(

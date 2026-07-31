@@ -15,11 +15,19 @@ def push_file(
     succeeded = 0
     failed = 0
     with open(file_path) as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                failed += 1
+                print(
+                    f"Warning: skipping malformed JSON on line {line_number}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
             body = json.dumps({"schema_version": 1, "rows": [row], "meta": {}}).encode()
             request = urllib.request.Request(
                 url,

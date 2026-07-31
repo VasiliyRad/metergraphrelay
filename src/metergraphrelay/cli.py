@@ -60,6 +60,11 @@ def _config_error(exc: ConfigError) -> int:
     return 1
 
 
+def _os_error(exc: OSError) -> int:
+    print(f"Error: {exc}", file=sys.stderr)
+    return 1
+
+
 def _not_implemented(provider: str) -> int:
     print(
         f"Error: pulling from {provider} is not implemented in this version.",
@@ -85,14 +90,17 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as exc:
             return _config_error(exc)
         client = OpenAI(api_key=creds["OPENAI_API_KEY"])
-        written = pull_openai(
-            client,
-            args.count,
-            args.output,
-            route=args.route,
-            include_content=args.include_content,
-            echo_stdout=args.stdout,
-        )
+        try:
+            written = pull_openai(
+                client,
+                args.count,
+                args.output,
+                route=args.route,
+                include_content=args.include_content,
+                echo_stdout=args.stdout,
+            )
+        except OSError as exc:
+            return _os_error(exc)
         if written == 0:
             print("No stored completions found. Try `metergraphrelay demo openai` first.")
         else:
@@ -114,9 +122,12 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as exc:
             return _config_error(exc)
         base_url = os.environ.get("METERGRAPH_INGEST_URL")
-        succeeded, failed = push_file(
-            args.file, creds["METERGRAPH_APP_TOKEN"], base_url=base_url
-        )
+        try:
+            succeeded, failed = push_file(
+                args.file, creds["METERGRAPH_APP_TOKEN"], base_url=base_url
+            )
+        except OSError as exc:
+            return _os_error(exc)
         if failed:
             print(f"Pushed {succeeded} row(s), {failed} failed.", file=sys.stderr)
             return 1
