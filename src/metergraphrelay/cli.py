@@ -13,7 +13,14 @@ from .push import push_file
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="metergraphrelay")
+    parser = argparse.ArgumentParser(
+        prog="metergraphrelay",
+        description=(
+            "Move LLM trace data between systems: pull stored traces from a "
+            "provider into a local JSONL file, then push them to metergraph. "
+            "Learn more: https://www.metergraph.dev/"
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     pull_parser = subparsers.add_parser(
@@ -23,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pull_openai_parser = pull_subparsers.add_parser("openai")
     pull_openai_parser.add_argument("-n", "--count", type=int, default=10)
-    pull_openai_parser.add_argument("--output", default="traces.jsonl")
+    pull_openai_parser.add_argument("--output", default="./traces.jsonl")
     pull_openai_parser.add_argument("--stdout", action="store_true")
     pull_openai_parser.add_argument("--route", default="openai/backfill")
     pull_openai_parser.add_argument("--include-content", action="store_true")
@@ -31,11 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pull_anthropic_parser = pull_subparsers.add_parser("anthropic")
     pull_anthropic_parser.add_argument("-n", "--count", type=int, default=10)
-    pull_anthropic_parser.add_argument("--output", default="traces.jsonl")
+    pull_anthropic_parser.add_argument("--output", default="./traces.jsonl")
     pull_anthropic_parser.add_argument("--env-file", default=".env")
 
     pull_langfuse_parser = pull_subparsers.add_parser("langfuse")
-    pull_langfuse_parser.add_argument("--output", default="traces.jsonl")
+    pull_langfuse_parser.add_argument("--output", default="./traces.jsonl")
     pull_langfuse_parser.add_argument("--env-file", default=".env")
 
     demo_parser = subparsers.add_parser(
