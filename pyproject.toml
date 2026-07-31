@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +9,14 @@ description = "Move LLM trace data between systems: pull from providers, push to
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+authors = [{ name = "Vasiliy Radostev" }]
+keywords = ["llm", "openai", "observability", "cost-tracking", "cli", "metergraph"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
 dependencies = [
     "openai>=1.63.0",
     "python-dotenv>=1.0",
@@ -17,6 +25,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/VasiliyRad/metergraphrelay"
 Repository = "https://github.com/VasiliyRad/metergraphrelay"
+Issues = "https://github.com/VasiliyRad/metergraphrelay/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
