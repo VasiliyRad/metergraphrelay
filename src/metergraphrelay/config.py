@@ -9,12 +9,29 @@ class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
 
 
-def load_api_key(env_file: str = ".env") -> str:
+CREDENTIAL_SPECS: dict[str, list[str]] = {
+    "openai": ["OPENAI_API_KEY"],
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "langfuse": ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
+    "push": ["METERGRAPH_APP_TOKEN"],
+}
+
+
+def require_credentials(target: str, env_file: str = ".env") -> dict[str, str]:
     load_dotenv(env_file, override=True)
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
+    var_names = CREDENTIAL_SPECS[target]
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    for name in var_names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            values[name] = value
+        else:
+            missing.append(name)
+    if missing:
+        joined = ", ".join(missing)
         raise ConfigError(
-            f"OPENAI_API_KEY is not set. Add it to {env_file} "
-            "(see .env.example) or export it in your shell."
+            f"{joined} not set. Add {'it' if len(missing) == 1 else 'them'} to "
+            f"{env_file} (see .env.example) or export in your shell."
         )
-    return api_key
+    return values
