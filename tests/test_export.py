@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from openai_exporter.export import normalize_completion, export_traces
+from metergraphrelay.export import normalize_completion, export_traces
 
 
 def make_completion(**overrides):

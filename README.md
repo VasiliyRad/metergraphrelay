@@ -1,4 +1,4 @@
-# openai-exporter
+# metergraphrelay
 
 Export OpenAI stored chat completions as trace records, and optionally
 generate demo conversations to try it out.
@@ -9,7 +9,8 @@ Download the chat completions already stored in *your own* OpenAI
 account (completions created with `store=True`) as local JSONL trace
 records — useful for auditing, backups, or feeding into other tooling.
 This tool only reads what's associated with the API key you provide; it
-can't see or export anyone else's data.
+can't see or export anyone else's data. Built to integrate with metergraph,
+but also works as a standalone utility.
 
 Built on OpenAI's [List Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/list),
 which returns completions that were created with `store: true`. See the
@@ -27,23 +28,23 @@ for the underlying data model.
 Generate 1-2 demo conversations (stored with `store=True`) so there's
 data to export:
 
-    openai-exporter demo
+    metergraphrelay demo
 
 Export the 10 most recent stored chat completions to `traces.jsonl`:
 
-    openai-exporter export
+    metergraphrelay export
 
 Options:
 
-    openai-exporter export -n 25 --output my-traces.jsonl --stdout
-    openai-exporter demo --model gpt-4o-mini
+    metergraphrelay export -n 25 --output my-traces.jsonl --stdout
+    metergraphrelay demo --model gpt-4o-mini
 
 Both subcommands accept `--env-file PATH` to point at a config file
 other than `./.env`.
 
 ## Using it against your real system (not just the demo)
 
-`openai-exporter export` only finds completions that were created with
+`metergraphrelay export` only finds completions that were created with
 `store=True`. The `demo` subcommand sets that flag for you, but for your
 own application to show up in an export, its own OpenAI calls need the
 same flag. The only change required is adding `store=True` (and,
@@ -63,7 +64,7 @@ you're already making:
 
 No other code changes are needed — the request and response are handled
 exactly as before. Once your app is sending `store=True`, its completions
-become visible to `openai-exporter export` (or to the
+become visible to `metergraphrelay export` (or to the
 [List Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/list)
 directly) using the same API key.
 
@@ -72,7 +73,7 @@ Two things worth knowing before flipping this on in production:
   so treat them as you would any other place your data is retained.
 - Storage has no automatic expiry from this tool's side — deletion is a
   separate API call ([Delete chat completion](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/delete)),
-  not something `openai-exporter` currently does.
+  not something `metergraphrelay` currently does.
 
 ## Trace record shape
 

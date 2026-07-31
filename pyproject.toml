@@ -3,9 +3,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openai-exporter"
+name = "metergraphrelay"
 version = "0.1.0"
-description = "Export OpenAI stored chat completions as trace records, with a demo mode to generate sample data."
+description = "Move LLM trace data between systems: pull from providers, push to metergraph."
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
@@ -13,11 +14,15 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/VasiliyRad/metergraphrelay"
+Repository = "https://github.com/VasiliyRad/metergraphrelay"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-openai-exporter = "openai_exporter.cli:main"
+metergraphrelay = "metergraphrelay.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

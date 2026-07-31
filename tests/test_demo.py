@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from openai_exporter.demo import DEMO_PROMPTS, run_demo
+from metergraphrelay.demo import DEMO_PROMPTS, run_demo
 
 
 def make_completion(reply_text):

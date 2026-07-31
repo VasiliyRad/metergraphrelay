@@ -1,6 +1,6 @@
 import pytest
 
-from openai_exporter.config import ConfigError, load_api_key
+from metergraphrelay.config import ConfigError, load_api_key
 
 
 def test_load_api_key_reads_value_from_env_file(tmp_path, monkeypatch):
