@@ -38,6 +38,8 @@ def test_normalize_completion_with_content_included():
         "endpoint": "chat.completions",
         "input_tokens": 12,
         "output_tokens": 34,
+        "error": False,
+        "error_type": None,
         "request_id": "chatcmpl-abc123",
         "tags": {"foo": "bar"},
         "route": "openai/backfill",
@@ -62,6 +64,8 @@ def test_normalize_completion_without_content_included():
     assert row["response_text"] is None
     assert row["input_tokens"] == 12
     assert row["output_tokens"] == 34
+    assert row["error"] is False
+    assert row["error_type"] is None
 
 
 def test_normalize_completion_handles_missing_usage_and_metadata():
@@ -78,7 +82,13 @@ def test_normalize_completion_handles_missing_usage_and_metadata():
     assert row["response_text"] is None
 
 
-def test_normalize_completion_marks_error_status():
+def test_normalize_completion_keeps_success_and_tokens_on_content_fetch_error():
+    """The completion itself succeeded; only the messages sub-fetch failed.
+
+    Marking it as an error with null tokens would silently undercount real cost,
+    so status/tokens stay real and the partial failure is signalled via
+    error/error_type instead.
+    """
     completion = make_completion()
 
     row = normalize_completion(
@@ -86,15 +96,17 @@ def test_normalize_completion_marks_error_status():
         [make_message("user", "hi")],
         route="openai/backfill",
         include_content=True,
-        error=RuntimeError("boom"),
+        content_fetch_error=RuntimeError("boom"),
     )
 
-    assert row["status"] == "error"
+    assert row["status"] == "success"
+    assert row["input_tokens"] == 12
+    assert row["output_tokens"] == 34
+    assert row["error"] is True
+    assert row["error_type"] == "RuntimeError"
     assert row["content_opted_in"] is False
     assert row["request_json"] is None
     assert row["response_text"] is None
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
 
 
 def test_pull_openai_writes_jsonl_for_each_completion(tmp_path):
@@ -147,7 +159,9 @@ def test_pull_openai_empty_list_writes_empty_file(tmp_path):
     assert output_path.read_text() == ""
 
 
-def test_pull_openai_marks_message_fetch_failure_as_error(tmp_path, capsys):
+def test_pull_openai_flags_message_fetch_failure_without_losing_tokens(
+    tmp_path, capsys
+):
     client = MagicMock()
     completion = make_completion(id="chatcmpl-1", created=1780000000)
     client.chat.completions.list.return_value = [completion]
@@ -164,10 +178,44 @@ def test_pull_openai_marks_message_fetch_failure_as_error(tmp_path, capsys):
 
     assert written == 1
     row = json.loads(output_path.read_text().splitlines()[0])
-    assert row["status"] == "error"
+    assert row["status"] == "success"
+    assert row["error"] is True
+    assert row["error_type"] == "RuntimeError"
+    assert row["input_tokens"] == 12
+    assert row["output_tokens"] == 34
+    assert row["content_opted_in"] is False
     captured = capsys.readouterr()
     assert "chatcmpl-1" in captured.err
     assert "boom" in captured.err
+
+
+def test_pull_openai_skips_message_fetch_when_content_not_included(tmp_path):
+    client = MagicMock()
+    client.chat.completions.list.return_value = [
+        make_completion(id="chatcmpl-1", created=1780000000),
+        make_completion(id="chatcmpl-2", created=1780000100),
+    ]
+    output_path = tmp_path / "traces.jsonl"
+
+    written = pull_openai(
+        client,
+        count=2,
+        output_path=str(output_path),
+        route="openai/backfill",
+        include_content=False,
+    )
+
+    client.chat.completions.messages.list.assert_not_called()
+    assert written == 2
+    rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+    assert [row["request_id"] for row in rows] == ["chatcmpl-1", "chatcmpl-2"]
+    for row in rows:
+        assert row["status"] == "success"
+        assert row["error"] is False
+        assert row["error_type"] is None
+        assert row["content_opted_in"] is False
+        assert row["input_tokens"] == 12
+        assert row["output_tokens"] == 34
 
 
 class _FakeAutoPaginatingPage:

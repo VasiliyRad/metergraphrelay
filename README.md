@@ -96,6 +96,8 @@ metergraph's ingest API:
       "endpoint": "chat.completions",
       "input_tokens": 12,
       "output_tokens": 34,
+      "error": false,
+      "error_type": null,
       "request_id": "chatcmpl-...",
       "tags": {},
       "route": "openai/backfill",
@@ -108,6 +110,11 @@ metergraph's ingest API:
 
 `request_json`/`response_text` are populated only when `--include-content`
 is passed.
+
+Every completion returned by the stored-completions list already succeeded, so
+`status` is always `"success"`. `error`/`error_type` flag a *partial* record:
+`--include-content` was requested but the follow-up message fetch failed, so
+token counts are still real while the content is missing.
 
 ## Running tests
 
