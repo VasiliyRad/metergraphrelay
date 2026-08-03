@@ -30,8 +30,9 @@ def require_credentials(target: str, env_file: str = ".env") -> dict[str, str]:
             missing.append(name)
     if missing:
         joined = ", ".join(missing)
+        example = "\n".join(f"{name}=<value>" for name in missing)
         raise ConfigError(
-            f"{joined} not set. Add {'it' if len(missing) == 1 else 'them'} to "
-            f"{env_file} (see .env.example) or export in your shell."
+            f"{joined} not set. Add to {env_file}:\n{example}\n"
+            f"(or export {'it' if len(missing) == 1 else 'them'} in your shell)"
         )
     return values
