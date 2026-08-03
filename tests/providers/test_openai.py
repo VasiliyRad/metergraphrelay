@@ -13,6 +13,7 @@ def make_completion(**overrides):
         model="gpt-4o-mini",
         metadata={"foo": "bar"},
         usage=SimpleNamespace(prompt_tokens=12, completion_tokens=34),
+        choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))],
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -24,7 +25,7 @@ def make_message(role, content):
 
 def test_normalize_completion_with_content_included():
     completion = make_completion()
-    messages = [make_message("user", "hi"), make_message("assistant", "hello")]
+    messages = [make_message("user", "hi")]
 
     row = normalize_completion(
         completion, messages, route="openai/backfill", include_content=True
@@ -51,6 +52,32 @@ def test_normalize_completion_with_content_included():
     }
 
 
+def test_normalize_completion_response_text_comes_from_completion_choices():
+    """messages.list() only ever returns request/input messages in practice —
+    even if an assistant-role message shows up in the passed-in list, it must
+    not be used as response_text or stripped from request_json. The real
+    reply lives on completion.choices[0].message.content."""
+    completion = make_completion(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="real reply"))]
+    )
+    messages = [
+        make_message("user", "hi"),
+        make_message("assistant", "should not be used as response_text"),
+    ]
+
+    row = normalize_completion(
+        completion, messages, route="openai/backfill", include_content=True
+    )
+
+    assert row["response_text"] == "real reply"
+    assert row["request_json"] == json.dumps(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "should not be used as response_text"},
+        ]
+    )
+
+
 def test_normalize_completion_without_content_included():
     completion = make_completion()
     messages = [make_message("user", "hi"), make_message("assistant", "hello")]
@@ -69,7 +96,7 @@ def test_normalize_completion_without_content_included():
 
 
 def test_normalize_completion_handles_missing_usage_and_metadata():
-    completion = make_completion(usage=None, metadata=None)
+    completion = make_completion(usage=None, metadata=None, choices=[])
 
     row = normalize_completion(
         completion, [], route="openai/backfill", include_content=True

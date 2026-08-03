@@ -26,14 +26,14 @@ def normalize_completion(
     request_json: str | None = None
     response_text: str | None = None
     if content_opted_in:
-        if message_list and message_list[-1].role == "assistant":
-            response_text = message_list[-1].content
-            request_messages = message_list[:-1]
-        else:
-            request_messages = message_list
         request_json = json.dumps(
-            [{"role": m.role, "content": m.content} for m in request_messages]
+            [{"role": m.role, "content": m.content} for m in message_list]
         )
+        # messages.list() only ever returns the request/input messages, never
+        # the model's own reply — that lives on the completion object itself.
+        choices = getattr(completion, "choices", None) or []
+        if choices:
+            response_text = getattr(choices[0].message, "content", None)
 
     return {
         "ts": ts,
