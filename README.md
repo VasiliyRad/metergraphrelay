@@ -23,8 +23,11 @@ for the underlying data model.
 ## Setup
 
     pip install metergraphrelay
-    cp .env.example .env
-    # edit .env and set OPENAI_API_KEY
+
+Create a `.env` file in your working directory:
+
+    OPENAI_API_KEY=sk-...
+    METERGRAPH_APP_TOKEN=...
 
 ## Quickstart
 
