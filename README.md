@@ -100,7 +100,7 @@ metergraph's ingest API:
       "request_json": null,
       "response_text": null,
       "sdk": "metergraphrelay",
-      "sdk_version": "0.1.2"
+      "sdk_version": "0.1.3"
     }
 
 `request_json`/`response_text` are populated only when `--include-content`
