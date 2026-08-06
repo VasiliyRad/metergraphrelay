@@ -217,6 +217,98 @@ def test_main_pull_openai_unwritable_output_returns_clean_error(tmp_path, capsys
     assert "/no/such/dir/t.jsonl" in captured.err
 
 
+def test_main_sync_openai_missing_openai_credential_returns_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch("metergraphrelay.cli.pull_openai") as mock_pull, patch(
+        "metergraphrelay.cli.push_file"
+    ) as mock_push:
+        exit_code = main(["sync", "openai", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "OPENAI_API_KEY" in captured.err
+    mock_pull.assert_not_called()
+    mock_push.assert_not_called()
+
+
+def test_main_sync_openai_missing_push_credential_returns_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-test\n")
+
+    with patch("metergraphrelay.cli.pull_openai") as mock_pull, patch(
+        "metergraphrelay.cli.push_file"
+    ) as mock_push:
+        exit_code = main(["sync", "openai", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "METERGRAPH_APP_TOKEN" in captured.err
+    mock_pull.assert_not_called()
+    mock_push.assert_not_called()
+
+
+def test_main_sync_openai_pulls_then_pushes(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-test\nMETERGRAPH_APP_TOKEN=tok-123\n")
+    output_path = tmp_path / "out.jsonl"
+
+    with patch("metergraphrelay.cli.OpenAI") as mock_openai_cls, patch(
+        "metergraphrelay.cli.pull_openai", return_value=3
+    ) as mock_pull, patch(
+        "metergraphrelay.cli.push_file", return_value=(3, 0)
+    ) as mock_push:
+        exit_code = main(
+            [
+                "sync",
+                "openai",
+                "--env-file",
+                str(env_file),
+                "-n",
+                "3",
+                "--output",
+                str(output_path),
+            ]
+        )
+
+    assert exit_code == 0
+    mock_pull.assert_called_once_with(
+        mock_openai_cls.return_value,
+        3,
+        str(output_path),
+        route="openai/backfill",
+        include_content=False,
+        echo_stdout=False,
+    )
+    mock_push.assert_called_once_with(str(output_path), "tok-123", base_url=None)
+
+
+def test_main_sync_openai_reports_when_nothing_to_pull_and_skips_push(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-test\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch("metergraphrelay.cli.OpenAI"), patch(
+        "metergraphrelay.cli.pull_openai", return_value=0
+    ), patch("metergraphrelay.cli.push_file") as mock_push:
+        exit_code = main(["sync", "openai", "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    mock_push.assert_not_called()
+
+
+def test_main_sync_openai_returns_error_when_push_fails(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=sk-test\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch("metergraphrelay.cli.OpenAI"), patch(
+        "metergraphrelay.cli.pull_openai", return_value=2
+    ), patch("metergraphrelay.cli.push_file", return_value=(1, 1)):
+        exit_code = main(["sync", "openai", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+
+
 def test_main_push_uses_custom_ingest_url_from_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(

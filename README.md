@@ -34,6 +34,10 @@ Create a `.env` file in your working directory:
     metergraphrelay pull openai -n 25 --output traces.jsonl
     metergraphrelay push traces.jsonl
 
+Or do both in one step:
+
+    metergraphrelay sync openai -n 25 --output traces.jsonl
+
 No stored completions yet? Generate a couple first:
 
     metergraphrelay demo openai
@@ -61,6 +65,12 @@ Before enabling this in production:
     metergraphrelay pull openai -n 25 --output my-traces.jsonl --stdout --include-content --route my-app/support-bot
     metergraphrelay demo openai --model gpt-4o-mini
     metergraphrelay push traces.jsonl
+    metergraphrelay sync openai -n 25 --output my-traces.jsonl --route my-app/support-bot
+
+`sync openai` accepts the same flags as `pull openai`. It pulls to
+`--output` and immediately pushes that same file, checking both
+`OPENAI_API_KEY` and `METERGRAPH_APP_TOKEN` upfront so it fails fast
+instead of pulling data it can't push.
 
 `pull anthropic` / `pull langfuse` accept the same shape but aren't
 implemented yet — they check for `ANTHROPIC_API_KEY` /
