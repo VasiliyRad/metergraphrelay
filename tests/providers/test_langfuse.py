@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from metergraphrelay import __version__
 from metergraphrelay.providers.langfuse import (
     LangfuseAPIError,
     RESPONSE_FIELDS,
@@ -15,6 +16,7 @@ from metergraphrelay.providers.langfuse import (
     build_filter,
     fetch_observations_page,
     infer_provider,
+    normalize_observation,
 )
 
 
@@ -674,3 +676,106 @@ def test_map_content_mixed_valid_invalid_message_list_value_becomes_request_text
     mixed = [{"role": "user", "content": "hi"}, "not-a-dict"]
     result = _map_content(mixed)
     assert result == (None, json.dumps(mixed))
+
+
+def make_observation(**overrides):
+    defaults = dict(
+        id="obs-1",
+        traceId="trace-1",
+        type="GENERATION",
+        startTime="2026-08-07T12:00:00+00:00",
+        level="DEFAULT",
+        statusMessage=None,
+        parentObservationId=None,
+        sessionId=None,
+        providedModelName="gpt-4o-mini",
+        input=[{"role": "user", "content": "hi"}],
+        output="hello",
+        usageDetails={"input": 12, "output": 34},
+        totalCost=0.0012,
+        metadata={},
+        traceName="support-bot",
+        tags=["prod", "tier-1"],
+        environment="production",
+        name="chat-completion",
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+def test_normalize_observation_full_row():
+    observation = make_observation()
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row == {
+        "ts": "2026-08-07T12:00:00+00:00",
+        "source": "langfuse",
+        "sdk": "metergraphrelay",
+        "sdk_version": __version__,
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "status": "success",
+        "input_tokens": 12,
+        "output_tokens": 34,
+        "cost_usd": 0.0012,
+        "error": False,
+        "error_type": None,
+        "request_id": "obs-1",
+        "tags": {"langfuse_tags": ["prod", "tier-1"]},
+        "route": "support-bot",
+        "content_opted_in": True,
+        "request_json": json.dumps([{"role": "user", "content": "hi"}]),
+        "request_text": None,
+        "response_text": "hello",
+        "trace_id": "trace-1",
+        "span_id": "obs-1",
+        "parent_span_id": None,
+        "session_id": None,
+        "environment": "production",
+    }
+
+
+def test_normalize_observation_route_override_preserves_name_in_tags():
+    observation = make_observation(tags=[])
+
+    row = normalize_observation(observation, route_override="my-app/custom-route")
+
+    assert row["route"] == "my-app/custom-route"
+    assert row["tags"] == {"name": "support-bot"}
+
+
+def test_normalize_observation_falls_back_to_observation_name_when_trace_has_none():
+    observation = make_observation(traceName=None, name="raw-generation", tags=[])
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["route"] == "raw-generation"
+    assert row["tags"] == {}
+
+
+def test_normalize_observation_error_level_sets_error_and_status():
+    observation = make_observation(level="ERROR", statusMessage="rate limited")
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["status"] == "error"
+    assert row["error"] is True
+    assert row["error_type"] == "rate limited"
+
+
+def test_normalize_observation_missing_usage_details_yields_none_tokens():
+    observation = make_observation(usageDetails={})
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+
+
+def test_normalize_observation_missing_required_field_raises_key_error():
+    observation = make_observation()
+    del observation["startTime"]
+
+    with pytest.raises(KeyError):
+        normalize_observation(observation, route_override=None)

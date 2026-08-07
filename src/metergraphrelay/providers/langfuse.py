@@ -7,6 +7,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from .. import __version__
+
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 OBSERVATIONS_PATH = "/api/public/v2/observations"
 PAGE_LIMIT = 1000
@@ -233,3 +235,59 @@ def _response_text(output_value: Any) -> str | None:
     if isinstance(output_value, str):
         return output_value
     return json.dumps(output_value)
+
+
+def normalize_observation(
+    observation: dict[str, Any], *, route_override: str | None
+) -> dict:
+    trace_name = observation.get("traceName") or None
+    own_name = observation.get("name") or None
+    name_fallback = trace_name or own_name
+
+    if route_override:
+        route = route_override
+        name_consumed = False
+    else:
+        route = name_fallback or ""
+        name_consumed = True
+
+    tags: dict[str, Any] = {}
+    langfuse_tags = observation.get("tags")
+    if langfuse_tags:
+        tags["langfuse_tags"] = list(langfuse_tags)
+    if not name_consumed and name_fallback:
+        tags["name"] = name_fallback
+
+    error = observation.get("level") == "ERROR"
+    error_type = observation.get("statusMessage") if error else None
+
+    usage_details = observation.get("usageDetails") or {}
+    request_json, request_text = _map_content(observation.get("input"))
+    response_text = _response_text(observation.get("output"))
+
+    return {
+        "ts": observation["startTime"],
+        "source": "langfuse",
+        "sdk": "metergraphrelay",
+        "sdk_version": __version__,
+        "provider": infer_provider(observation),
+        "model": observation.get("providedModelName"),
+        "status": "error" if error else "success",
+        "input_tokens": usage_details.get("input"),
+        "output_tokens": usage_details.get("output"),
+        "cost_usd": observation.get("totalCost"),
+        "error": error,
+        "error_type": error_type,
+        "request_id": observation["id"],
+        "tags": tags,
+        "route": route,
+        "content_opted_in": True,
+        "request_json": request_json,
+        "request_text": request_text,
+        "response_text": response_text,
+        "trace_id": observation["traceId"],
+        "span_id": observation["id"],
+        "parent_span_id": observation.get("parentObservationId"),
+        "session_id": observation.get("sessionId"),
+        "environment": observation.get("environment"),
+    }
