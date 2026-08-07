@@ -773,9 +773,51 @@ def test_normalize_observation_missing_usage_details_yields_none_tokens():
     assert row["output_tokens"] is None
 
 
-def test_normalize_observation_missing_required_field_raises_key_error():
+@pytest.mark.parametrize("missing_field", ["startTime", "id", "traceId"])
+def test_normalize_observation_missing_required_field_raises_key_error(missing_field):
     observation = make_observation()
-    del observation["startTime"]
+    del observation[missing_field]
 
     with pytest.raises(KeyError):
         normalize_observation(observation, route_override=None)
+
+
+def test_normalize_observation_non_dict_usage_details_yields_none_tokens():
+    observation = make_observation(usageDetails="not-a-dict")
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+
+
+def test_normalize_observation_string_tags_are_ignored_not_character_split():
+    observation = make_observation(tags="prod")
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["tags"] == {}
+
+
+def test_normalize_observation_dict_tags_are_ignored_not_key_split():
+    observation = make_observation(tags={"env": "prod"})
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["tags"] == {}
+
+
+def test_normalize_observation_non_string_model_becomes_none():
+    observation = make_observation(providedModelName=12345)
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["model"] is None
+
+
+def test_normalize_observation_non_string_status_message_becomes_none_error_type():
+    observation = make_observation(level="ERROR", statusMessage={"code": 500})
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["error_type"] is None

@@ -253,17 +253,24 @@ def normalize_observation(
 
     tags: dict[str, Any] = {}
     langfuse_tags = observation.get("tags")
-    if langfuse_tags:
+    if isinstance(langfuse_tags, list) and langfuse_tags:
         tags["langfuse_tags"] = list(langfuse_tags)
     if not name_consumed and name_fallback:
         tags["name"] = name_fallback
 
     error = observation.get("level") == "ERROR"
-    error_type = observation.get("statusMessage") if error else None
+    raw_status_message = observation.get("statusMessage")
+    error_type = (
+        raw_status_message if error and isinstance(raw_status_message, str) else None
+    )
 
-    usage_details = observation.get("usageDetails") or {}
+    raw_usage_details = observation.get("usageDetails")
+    usage_details = raw_usage_details if isinstance(raw_usage_details, dict) else {}
     request_json, request_text = _map_content(observation.get("input"))
     response_text = _response_text(observation.get("output"))
+
+    raw_model = observation.get("providedModelName")
+    model = raw_model if isinstance(raw_model, str) else None
 
     return {
         "ts": observation["startTime"],
@@ -271,7 +278,7 @@ def normalize_observation(
         "sdk": "metergraphrelay",
         "sdk_version": __version__,
         "provider": infer_provider(observation),
-        "model": observation.get("providedModelName"),
+        "model": model,
         "status": "error" if error else "success",
         "input_tokens": usage_details.get("input"),
         "output_tokens": usage_details.get("output"),
