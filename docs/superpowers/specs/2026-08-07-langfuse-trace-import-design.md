@@ -129,6 +129,124 @@ immediately after a fresh pull is a common single-provider loop; nothing
 here precludes adding `sync langfuse` later by composing `pull langfuse`
 + the existing `push`, but it's not part of this spec.
 
+## Documentation deliverables
+
+Added per user review: README and CLI `--help` text are **required
+deliverables of this feature**, not follow-up polish — see "Acceptance
+criteria / implementation handoff" below. Both must exist before this
+feature is considered done.
+
+### README
+
+Add a `pull langfuse` section to `README.md`, positioned alongside the
+existing `pull openai` documentation and following the same terse,
+example-driven style already used there. It must cover, explicitly:
+
+- **Quickstart**: a minimal runnable example, e.g.
+  `metergraphrelay pull langfuse -n 25 --output traces.jsonl` followed by
+  `metergraphrelay push traces.jsonl` — mirroring the existing
+  `pull openai`/`push` two-step quickstart already in the README.
+- **Credential/env configuration**: `LANGFUSE_PUBLIC_KEY` and
+  `LANGFUSE_SECRET_KEY` in `.env`, matching the `.env` block already
+  shown in the README's Setup section (which today only lists
+  `OPENAI_API_KEY`/`METERGRAPH_APP_TOKEN` — this needs to grow to
+  include the Langfuse pair, or clearly point to `.env.example`, which
+  already lists both).
+- **Cloud vs self-hosted host configuration**: `LANGFUSE_HOST` unset →
+  Langfuse Cloud; set (or `--base-url` passed) → that self-hosted
+  instance. State the default explicitly rather than leaving it
+  implicit, since this is the one piece of config that differs in kind
+  (a URL, not a secret) from every other credential in this tool.
+  Verified default: `https://cloud.langfuse.com` (see "Auth & config").
+  Note that the URL Langfuse's docs currently cite may drift — confirm
+  the live current Cloud default at implementation time rather than
+  copying this spec's value unverified into the README.
+- **Command examples/defaults**: at least one example using `--since`/
+  `--until`, and a explicit statement of `--count`'s default (`100`) —
+  the full flag table from the CLI section above, in prose or table
+  form, so a reader doesn't have to guess a default by trial and error.
+- **v4+ requirement**: state plainly that self-hosted Langfuse must be
+  v4+ (the version serving the v2 Observations API) — older self-hosted
+  instances are not supported (see Scope, API freshness).
+- **Generation-only / no-evals scope**: state plainly that only
+  `GENERATION` observations (LLM call records) are imported —
+  `SPAN`/`EVENT` observations and Langfuse Scores/evals are not (see
+  Scope).
+- **Prominent content-transfer/privacy warning**: the same substance as
+  "Explicit content-transfer warning" below, written prominently enough
+  in the README that a reader encounters it before running the command
+  — not buried at the end of a long section. The existing README already
+  has a precedent for this pattern (the "Before enabling this in
+  production" callout under "Enabling storage on your own calls" for
+  the OpenAI path) — follow that same visibility convention here.
+
+### CLI `--help` text
+
+Every flag in the CLI table above must have complete, accurate
+`argparse` help text — defaults and env-var relationships stated in the
+text itself, not left to be inferred from behavior. Draft text (exact
+`argparse` wrapping/formatting is implementation detail; the content
+below is what must be present, in substance, not verbatim):
+
+```
+usage: metergraphrelay pull langfuse [-h] [-n COUNT] [--since SINCE]
+                                      [--until UNTIL] [--environment ENVIRONMENT]
+                                      [--route ROUTE] [--base-url BASE_URL]
+                                      [--output OUTPUT] [--env-file ENV_FILE]
+                                      [--langfuse-public-key KEY]
+                                      [--langfuse-secret-key KEY]
+
+Pull Langfuse GENERATION observations (LLM call records) into a local
+JSONL file shaped for metergraph's ingest API. SPAN/EVENT observations
+and scores/evals are not imported. Requires Langfuse Cloud or
+self-hosted v4+ (the v2 Observations API). WARNING: generation
+input/output content is transferred from Langfuse into the local
+output file, and from there into metergraph via `push`, with no
+opt-in gate.
+
+options:
+  -h, --help            show this help message and exit
+  -n COUNT, --count COUNT
+                        Maximum number of GENERATION observations to
+                        import. (default: 100)
+  --since SINCE         Only import observations at or after this ISO
+                        8601 timestamp (Langfuse fromTimestamp,
+                        inclusive). (default: no lower bound)
+  --until UNTIL         Only import observations before this ISO 8601
+                        timestamp (Langfuse toTimestamp, exclusive).
+                        (default: the time this command started
+                        running, captured once for the whole pull)
+  --environment ENVIRONMENT
+                        Filter to a single Langfuse environment value.
+                        (default: no filter, all environments)
+  --route ROUTE         Override the metergraph route field for every
+                        imported row. (default: the Langfuse trace
+                        name, or the generation's own name if the
+                        trace has none)
+  --base-url BASE_URL   Langfuse API base URL. (default: $LANGFUSE_HOST
+                        if set, else Langfuse Cloud)
+  --output OUTPUT       Path to write the resulting JSONL file.
+                        (default: ./traces.jsonl)
+  --env-file ENV_FILE   Path to a .env file to load credentials from.
+                        (default: .env)
+  --langfuse-public-key KEY
+                        Langfuse public key (Basic Auth username).
+                        Overrides $LANGFUSE_PUBLIC_KEY / .env if given;
+                        env/.env is the preferred path.
+  --langfuse-secret-key KEY
+                        Langfuse secret key (Basic Auth password).
+                        Overrides $LANGFUSE_SECRET_KEY / .env if given;
+                        env/.env is the preferred path.
+```
+
+The `pull` subparser's own subcommand listing (`metergraphrelay pull
+--help`) must also gain a one-line `help=` string for `langfuse`
+alongside the existing `openai`/`anthropic` entries, e.g. "Pull
+GENERATION call records from Langfuse (v2 Observations API,
+Cloud/self-hosted v4+); no evals/spans/events" — short enough to fit
+the subcommand-listing format `build_parser()` already uses for the
+other two.
+
 ## Mapping
 
 Each GENERATION observation → one metergraph-native row:
@@ -275,6 +393,28 @@ rather than hitting a real API. Coverage to include:
   same seam as the unit tests above — same layering `test_cli.py`
   already uses (`patch("metergraphrelay.cli.pull_openai", ...)` style)
   for the OpenAI path.
+- **CLI help documents the interface** (added per user review): a test
+  captures `metergraphrelay pull langfuse --help` output (e.g. via
+  `build_parser().parse_args(["pull", "langfuse", "--help"])` catching
+  `SystemExit`, or `argparse`'s `format_help()` directly) and asserts it
+  contains every flag from the CLI table above, each flag's stated
+  default, and the env-var relationship text for `--base-url`,
+  `--langfuse-public-key`, and `--langfuse-secret-key`. This is a
+  regression guard: a future flag added/renamed/removed without a
+  matching help-text update fails this test, keeping `--help` from
+  silently drifting away from this spec and the README.
+- **Documentation-consistency check** (added per user review): where
+  practical, keep README examples from silently rotting relative to the
+  implemented interface. Concretely: every `pull langfuse` command shown
+  in the README is parsed (not necessarily executed against a live
+  Langfuse) via `build_parser().parse_args([...])` using the exact flags
+  from that example, asserting it parses without error — so a doc
+  example using a since-renamed/removed flag fails a test instead of
+  quietly going stale. Full end-to-end execution of README examples
+  against live Langfuse data is out of scope for this test (no live
+  credentials in CI, per the "no live Langfuse credentials or network
+  access required" rule above) — parsing/dispatch-level consistency is
+  the practical bar, not live-output equivalence.
 
 ## API freshness / version compatibility
 
@@ -348,6 +488,40 @@ down via docs/spec alone.
 - See "Explicit content-transfer warning" above: this command moves
   prompt/response content by default, with no opt-in gate — the
   privacy-relevant behavior a user most needs to know before running it.
+
+## Acceptance criteria / implementation handoff
+
+Added per user review, so README and CLI help are explicit,
+non-optional parts of this feature's definition of done rather than
+follow-up polish. This feature is complete only when all of the
+following hold:
+
+- [ ] `pull langfuse` is implemented per Architecture, CLI, Mapping, and
+      Failure semantics above.
+- [ ] Tests exist per the Testing section above, including the two
+      documentation-specific items added in this review pass (CLI help
+      content, README example parse-consistency).
+- [ ] `README.md` has a `pull langfuse` section covering: quickstart,
+      credential/env configuration, Cloud vs. self-hosted host
+      configuration, command examples with defaults stated, the v4+
+      self-hosted requirement, the generation-only/no-evals scope
+      statement, and a prominent content-transfer/privacy warning — all
+      per "Documentation deliverables → README" above.
+- [ ] `metergraphrelay pull langfuse --help` and `metergraphrelay pull
+      --help`'s `langfuse` subcommand line are complete per
+      "Documentation deliverables → CLI `--help` text" above — every
+      flag, its default, and (for `--base-url`/credential flags) its
+      env-var relationship, stated in the help text itself.
+- [ ] `.env.example` already lists `LANGFUSE_PUBLIC_KEY`/
+      `LANGFUSE_SECRET_KEY` (verified pre-existing); confirm at
+      implementation time whether `LANGFUSE_HOST` should be added there
+      too, since it's a new env var this feature introduces that
+      `.env.example` doesn't yet mention.
+
+A PR implementing this design that lands `pull langfuse` code without
+the README section and complete `--help` text is **not** a complete
+implementation of this spec — both are part of the same handoff, not a
+separate follow-up task.
 
 ## Non-goals
 
