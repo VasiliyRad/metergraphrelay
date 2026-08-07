@@ -614,3 +614,37 @@ def test_response_text_serializes_non_string():
 
 def test_response_text_none_stays_none():
     assert _response_text(None) is None
+
+
+def test_map_content_raw_json_chat_message_string_becomes_canonical_request_json():
+    raw = '[{"role":   "user",  "content": "hi"}]'  # unusual spacing on purpose
+    result = _map_content(raw)
+    assert result == (json.dumps([{"role": "user", "content": "hi"}]), None)
+    assert result[0] != raw  # proves canonical re-serialization, not passthrough
+
+
+def test_map_content_raw_json_non_chat_object_string_stays_byte_for_byte():
+    raw = '{"foo": "bar"}'
+    assert _map_content(raw) == (None, raw)
+
+
+def test_map_content_raw_json_non_message_list_string_stays_byte_for_byte():
+    raw = "[1, 2, 3]"
+    assert _map_content(raw) == (None, raw)
+
+
+def test_map_content_malformed_json_string_stays_byte_for_byte():
+    raw = '{"role": "user", "content": '  # truncated/invalid JSON
+    assert _map_content(raw) == (None, raw)
+
+
+def test_response_text_serializes_list():
+    assert _response_text([1, 2, 3]) == json.dumps([1, 2, 3])
+
+
+def test_response_text_serializes_number():
+    assert _response_text(42) == json.dumps(42)
+
+
+def test_response_text_serializes_bool():
+    assert _response_text(True) == json.dumps(True)

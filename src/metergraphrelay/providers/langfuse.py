@@ -202,12 +202,22 @@ def _is_chat_message_list(value: Any) -> bool:
     )
 
 
+def _try_parse_json(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
 def _map_content(input_value: Any) -> tuple[str | None, str | None]:
     if input_value is None:
         return None, None
     if _is_chat_message_list(input_value):
         return json.dumps(input_value), None
     if isinstance(input_value, str):
+        parsed = _try_parse_json(input_value)
+        if _is_chat_message_list(parsed):
+            return json.dumps(parsed), None
         return None, input_value
     return None, json.dumps(input_value)
 
