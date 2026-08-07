@@ -81,6 +81,13 @@ changes needed there:
   `GET /api/public/v2/observations?type=GENERATION`, following the
   `meta` block in each response for continuation, per Langfuse's
   documented pagination contract (default limit 50, max 1000 per page).
+- **Filtering is server-side, on every page request**: `--trace-name`/
+  `--tag`/`--environment`/`--since`/`--until` are translated into
+  additional query parameters (or a JSON filter parameter — see
+  "Targeting & filtering" below for why the exact shape isn't finalized
+  yet) sent alongside `type`/`page`/`limit` on *each* paginated request,
+  not applied once and cached — this tool never downloads a broader
+  result set than the selectors describe and filters locally.
 - **Normalize**: each GENERATION observation → one metergraph-native row
   dict, via a pure function analogous to `normalize_completion` in
   `providers/openai.py`, independently unit-testable without touching
@@ -106,6 +113,7 @@ changes needed there:
 
 ```
 metergraphrelay pull langfuse [-n/--count 100] [--since ISO8601] [--until ISO8601]
+                               [--trace-name NAME ...] [--tag TAG ...]
                                [--environment ENV] [--route ROUTE]
                                [--base-url URL] [--output ./traces.jsonl]
                                [--env-file .env]
@@ -114,11 +122,13 @@ metergraphrelay pull langfuse [-n/--count 100] [--since ISO8601] [--until ISO860
 
 | flag | default | notes |
 |---|---|---|
-| `-n`/`--count` | `100` | cap on rows imported this run — a manual, bounded pull, same spirit as `pull openai`'s `-n` |
+| `-n`/`--count` | `100` | maximum number of **GENERATION observations** imported this run — never a count of distinct traces (see "Targeting & filtering" below); a manual, bounded pull, same spirit as `pull openai`'s `-n` |
 | `--since` | none (no lower bound) | `fromTimestamp`; omitted means "as far back as Langfuse has data" |
 | `--until` | the wall-clock time the command started running | `toTimestamp`; captured once at invocation, not re-evaluated per page, so a long-running paginated pull has a stable, reproducible window even if new generations land in Langfuse mid-run |
-| `--environment` | none | passed through to Langfuse's `environment` filter, if set |
-| `--route` | none — falls back to trace/generation name (see Mapping) | same semantics as `pull openai --route`: caller-supplied override |
+| `--trace-name` | none — repeatable, no filter if omitted | matches against Langfuse's trace `name`; may be passed multiple times — **OR semantics** (any listed name matches). Combines with every other selector (`--tag`, `--environment`, `--since`/`--until`) via AND. See "Targeting & filtering" below. |
+| `--tag` | none — repeatable, no filter if omitted | matches against Langfuse trace tags; may be passed multiple times — **AND semantics** (all listed tags must be present on the trace). Combines with every other selector via AND. See "Targeting & filtering" below. |
+| `--environment` | none | passed through to Langfuse's `environment` filter, if set; combines with all other selectors via AND |
+| `--route` | none — falls back to trace/generation name (see Mapping) | same semantics as `pull openai --route`: caller-supplied override of the **output** row's `route` field. Distinct from `--trace-name`, which selects **which** generations get pulled in the first place — see "Targeting & filtering" below for why these are two different flags despite both concerning trace names. |
 | `--base-url` | none — falls back to `LANGFUSE_HOST` env, then Langfuse Cloud | CLI override path for self-hosted instances, per the "flags are the escape hatch" rule above |
 | `--output` | `./traces.jsonl` | matches `pull openai`'s default |
 | `--env-file` | `.env` | matches every existing subcommand |
@@ -128,6 +138,101 @@ No `sync langfuse` in this design — `sync openai` exists because pushing
 immediately after a fresh pull is a common single-provider loop; nothing
 here precludes adding `sync langfuse` later by composing `pull langfuse`
 + the existing `push`, but it's not part of this spec.
+
+## Targeting & filtering
+
+Added per newly approved targeting design (user review). `--trace-name`
+and `--tag` are **optional, repeatable selectors** narrowing which
+GENERATION observations are eligible for a pull, on top of the existing
+`--since`/`--until`/`--environment` narrowing.
+
+**Default behavior is unchanged when no selectors are supplied**: the
+latest `--count` (default `100`) GENERATION observations overall,
+across all traces — never "100 distinct traces" or "100 per trace."
+Adding selectors narrows the eligible set that `--count` is then applied
+to; it does not change what `--count` counts.
+
+**Combination semantics:**
+- Multiple `--trace-name` values: **OR** — a generation matches if its
+  trace name is *any* of the given names.
+- Multiple `--tag` values: **AND** — a generation matches only if its
+  trace carries *all* of the given tags.
+- `--trace-name`, `--tag`, `--environment`, and the `--since`/`--until`
+  window all combine with each other via **AND** — e.g.
+  `--trace-name support-bot --trace-name billing-bot --tag prod
+  --tag tier-1 --environment production` means: (trace name is
+  `support-bot` OR `billing-bot`) AND (tagged `prod` AND `tier-1`) AND
+  (environment is `production`).
+
+**How Langfuse customers typically organize this data** (context for
+why these two selectors, specifically, are the targeting mechanism):
+- **`traceName`** is the closest Langfuse concept to a workflow or use
+  case — e.g. `"support-bot-reply"`, `"invoice-summarizer"`. This is
+  also why `pull langfuse`'s own `route` field defaults from trace name
+  when `--route` isn't given (see Mapping) — `--trace-name` (a pull-time
+  *filter*) and `--route` (an output-row *override*) are related in
+  concept but operate at different points in the pipeline: `--trace-name`
+  decides what gets fetched from Langfuse at all; `--route` decides what
+  gets written into the `route` field of whatever *was* fetched,
+  regardless of which trace(s) it came from.
+- **Tags** are free-form, and in practice are commonly used by customers
+  as categories that cut across workflows — a customer/tenant
+  identifier, an experiment cohort, a priority tier — but this is a
+  convention, not something Langfuse or this tool enforces.
+- **`--environment`/`--since`/`--until`** are additional narrowing
+  dimensions, orthogonal to trace name/tags.
+- **Tags are optional and not retroactive**: `--tag` only matches tags
+  that already exist on historical data. It cannot require a tag that
+  was never set on older traces, and omitting `--tag` entirely means
+  "no tag-based narrowing" — not "untagged only." A customer whose
+  historical Langfuse data has inconsistent or absent tagging can still
+  use `--trace-name`/`--environment`/`--since`/`--until` alone, or no
+  selectors at all.
+
+**No trace-ID selector.** Targeting is by trace *name* and *tag*, not
+trace *ID* — see Non-goals.
+
+**Server-side only.** All of the above is applied through Observations
+API v2's own filter/query capabilities in the outgoing request(s) to
+`GET /api/public/v2/observations` — **never** by fetching a broader set
+of observations and filtering them locally after download. Downloading
+unfiltered/broader content than the caller asked for and discarding the
+rest locally would both waste calls against Langfuse's rate limits and
+work against the content-transfer-minimization goal selectors exist for
+in the first place (see "Explicit content-transfer warning").
+
+**Implementation consideration — exact filter representation is
+unverified, and must not be guessed.** This design pass confirmed (see
+prior spec revisions) that Langfuse's v1 `/api/public/traces` endpoint
+accepts discrete query params (`name`, `tags`, `fromTimestamp`,
+`toTimestamp`, `environment`, etc.), and that some other Langfuse v2/
+Metrics endpoints instead take a single generic, JSON-encoded `filter`
+query parameter (a list of `{column, operator, value, type}`-shaped
+conditions). **Neither the exact param names nor the choice between
+"discrete params" vs. "generic JSON filter" was independently confirmed
+for `GET /api/public/v2/observations` specifically** — the endpoint this
+design targets — during this or prior design passes. Before writing the
+query-construction code, implementation must:
+1. Confirm, against Langfuse's live OpenAPI spec or a sandboxed call,
+   exactly how `type=GENERATION` plus trace-name (OR-of-many) plus tags
+   (AND-of-many) plus `environment`/`fromTimestamp`/`toTimestamp` are
+   expressed as query parameters on this specific endpoint.
+2. If a generic JSON `filter` parameter is required, confirm its exact
+   schema (field names, supported operators, how OR-within-trace-name
+   and AND-within-tags are each expressed within that shape) the same
+   way — against real docs/spec/API responses, not by inference from
+   other Langfuse endpoints.
+3. Write tests against whatever representation is actually confirmed
+   and implemented (see Testing below) — this spec deliberately does
+   not hardcode a guessed parameter name or JSON shape, per the
+   "don't guess unsupported query parameters" requirement from review.
+
+If, after that verification, `GET /api/public/v2/observations` turns
+out not to support the full combination this spec requires (trace-name
+OR-set AND tag AND-set AND environment AND time-window, all server-side,
+on this endpoint), that is a blocking design gap requiring a follow-up
+decision — not something to silently route around via local
+post-filtering, which this design explicitly rules out above.
 
 ## Documentation deliverables
 
@@ -162,9 +267,23 @@ example-driven style already used there. It must cover, explicitly:
   the live current Cloud default at implementation time rather than
   copying this spec's value unverified into the README.
 - **Command examples/defaults**: at least one example using `--since`/
-  `--until`, and a explicit statement of `--count`'s default (`100`) —
-  the full flag table from the CLI section above, in prose or table
-  form, so a reader doesn't have to guess a default by trial and error.
+  `--until`, at least one example using `--trace-name`/`--tag` together
+  (demonstrating OR-within-`--trace-name` and AND-within-`--tag` with
+  more than one value each), and an explicit statement of `--count`'s
+  default (`100`) — the full flag table from the CLI section above, in
+  prose or table form, so a reader doesn't have to guess a default by
+  trial and error. State plainly that with no selectors given, the
+  command still imports the latest 100 GENERATION observations overall
+  (not 100 distinct traces) — the same default as before selectors
+  existed.
+- **Targeting/selector explanation**: a short paragraph, aimed at a
+  reader unfamiliar with Langfuse's own conventions, covering the same
+  substance as "Targeting & filtering" above — `traceName` as
+  workflow/use-case, tags as customer-defined categories (not enforced
+  by Langfuse), `--environment`/`--since`/`--until` as additional
+  narrowing, and that tags are optional and only match tags that
+  already exist on historical data (omitting `--tag` is "no tag
+  filter," not "untagged only").
 - **v4+ requirement**: state plainly that self-hosted Langfuse must be
   v4+ (the version serving the v2 Observations API) — older self-hosted
   instances are not supported (see Scope, API freshness).
@@ -190,7 +309,8 @@ below is what must be present, in substance, not verbatim):
 
 ```
 usage: metergraphrelay pull langfuse [-h] [-n COUNT] [--since SINCE]
-                                      [--until UNTIL] [--environment ENVIRONMENT]
+                                      [--until UNTIL] [--trace-name NAME]
+                                      [--tag TAG] [--environment ENVIRONMENT]
                                       [--route ROUTE] [--base-url BASE_URL]
                                       [--output OUTPUT] [--env-file ENV_FILE]
                                       [--langfuse-public-key KEY]
@@ -199,16 +319,18 @@ usage: metergraphrelay pull langfuse [-h] [-n COUNT] [--since SINCE]
 Pull Langfuse GENERATION observations (LLM call records) into a local
 JSONL file shaped for metergraph's ingest API. SPAN/EVENT observations
 and scores/evals are not imported. Requires Langfuse Cloud or
-self-hosted v4+ (the v2 Observations API). WARNING: generation
-input/output content is transferred from Langfuse into the local
-output file, and from there into metergraph via `push`, with no
-opt-in gate.
+self-hosted v4+ (the v2 Observations API). With no --trace-name/--tag/
+--environment/--since/--until given, imports the latest --count
+GENERATION observations overall. WARNING: generation input/output
+content is transferred from Langfuse into the local output file, and
+from there into metergraph via `push`, with no opt-in gate.
 
 options:
   -h, --help            show this help message and exit
   -n COUNT, --count COUNT
                         Maximum number of GENERATION observations to
-                        import. (default: 100)
+                        import (never a count of distinct traces).
+                        (default: 100)
   --since SINCE         Only import observations at or after this ISO
                         8601 timestamp (Langfuse fromTimestamp,
                         inclusive). (default: no lower bound)
@@ -216,13 +338,28 @@ options:
                         timestamp (Langfuse toTimestamp, exclusive).
                         (default: the time this command started
                         running, captured once for the whole pull)
+  --trace-name NAME     Only import generations whose trace name is
+                        NAME. Repeatable: multiple --trace-name values
+                        are OR'd together (any match). Combines with
+                        --tag/--environment/--since/--until using AND.
+                        (default: no filter, all trace names)
+  --tag TAG             Only import generations whose trace has tag
+                        TAG. Repeatable: multiple --tag values require
+                        ALL given tags to be present (AND). Combines
+                        with --trace-name/--environment/--since/--until
+                        using AND. Only matches tags that already exist
+                        on the data; omitting --tag means no tag
+                        filter, not "untagged only". (default: no
+                        filter, all tags)
   --environment ENVIRONMENT
                         Filter to a single Langfuse environment value.
                         (default: no filter, all environments)
   --route ROUTE         Override the metergraph route field for every
                         imported row. (default: the Langfuse trace
                         name, or the generation's own name if the
-                        trace has none)
+                        trace has none) Not a selector — see
+                        --trace-name for filtering which generations
+                        are pulled.
   --base-url BASE_URL   Langfuse API base URL. (default: $LANGFUSE_HOST
                         if set, else Langfuse Cloud)
   --output OUTPUT       Path to write the resulting JSONL file.
@@ -294,7 +431,9 @@ follow-up, not part of this design.
 `pull langfuse` is **stateless between invocations**, matching
 `pull_openai`'s existing "always overwrite `--output`" behavior — there
 is no persisted cursor, last-seen-timestamp, or local ledger. Each run
-is a fresh, manually-bounded query over `[--since, --until]`.
+is a fresh, manually-bounded query over whatever combination of
+`--trace-name`/`--tag`/`--environment`/`--since`/`--until` (any, all,
+or none of them) was given on that invocation.
 
 `span_id` (Langfuse observation `id`) is stable and identical across
 repeated pulls of the same underlying generation (see Mapping above) —
@@ -322,6 +461,14 @@ Architecture):
 - Invalid/unexpected top-level response shape (e.g. missing `data`/
   `meta`, non-JSON body) — including the "unsupported older deployment"
   case, see API freshness below.
+- Langfuse rejects the constructed filter/query itself (e.g. a 400
+  Bad Request in response to the `--trace-name`/`--tag`/`--environment`/
+  `--since`/`--until` combination sent as query parameters or a JSON
+  filter body) — handled identically to any other request failure
+  (fatal, clear stderr message, no output-file change). This failure
+  mode is specific to selector usage and more likely to surface until
+  the exact filter representation is confirmed (see "Targeting &
+  filtering" above).
 
 **Non-fatal, per-record** (skip the individual malformed record, print
 a warning to stderr naming the observation `id` where available, keep
@@ -341,11 +488,19 @@ prevent the file from being written.
 
 - Page size: as large as practical up to Langfuse's documented maximum
   of `1000` per page.
+- Every page request carries the full selector set for that invocation
+  (`type=GENERATION` plus whichever of `--trace-name`/`--tag`/
+  `--environment`/`--since`/`--until` were given) — see "Targeting &
+  filtering" above; pagination and filtering are independent axes, not
+  filtering-then-paginating-locally.
 - Stop condition: whichever comes first —
   1. `count` rows have been collected (the `-n/--count` cap), or
-  2. the `[--since, --until]` window is exhausted (Langfuse returns a
+  2. the selector-bounded result set is exhausted (Langfuse returns a
      page with no further cursor / fewer than the requested page size
-     with no more matching data).
+     with no more matching data) — whether that boundary comes from
+     `--since`/`--until`, from `--trace-name`/`--tag`/`--environment`,
+     from all of them combined, or from none of them (Langfuse simply
+     running out of GENERATION observations).
 - No auto-pagination past `count`, mirroring `pull_openai`'s existing,
   explicitly tested behavior (`test_pull_openai_does_not_paginate_past_count`)
   of capping consumption even when the underlying page/iterator would
@@ -368,9 +523,40 @@ rather than hitting a real API. Coverage to include:
   stops at `count`; stops at window exhaustion when `count` isn't hit.
 - **Optional/default bounds**: `--since` omitted → no `fromTimestamp`
   sent; `--until` omitted → captured command-start time is sent and is
-  stable across a multi-page pull (not re-evaluated per page).
+  stable across a multi-page pull (not re-evaluated per page);
+  `--trace-name`/`--tag`/`--environment` omitted → no corresponding
+  filter sent at all (not an empty-list/empty-string filter).
 - **`--count` enforcement**: never imports more than requested even if
   more data is available (same style as the existing OpenAI test).
+- **Default behavior unchanged with no selectors** (added per targeting
+  design review): a call with none of `--trace-name`/`--tag`/
+  `--environment`/`--since`/`--until` set imports the latest `--count`
+  GENERATION observations overall — explicitly asserted as a regression
+  guard against `--count` ever being reinterpreted as "distinct traces"
+  or "per trace" once selectors exist alongside it.
+- **`--trace-name` OR semantics** (added per targeting design review):
+  a single `--trace-name` filters to that name; two or more
+  `--trace-name` values match a generation if *any* given name matches
+  its trace's name — asserted against the query/filter representation
+  actually implemented (see "Targeting & filtering" above; the exact
+  parameter shape is an implementation-time verification, not
+  hardcoded by this spec).
+- **`--tag` AND semantics** (added per targeting design review): a
+  single `--tag` filters to that tag; two or more `--tag` values match
+  a generation only if its trace carries *all* given tags — same
+  implemented-representation caveat as above.
+- **Selector combination is AND across categories** (added per
+  targeting design review): `--trace-name` + `--tag` + `--environment`
+  + `--since`/`--until` given together produce a single combined
+  filter requiring all categories to match simultaneously (the
+  OR-within-`--trace-name` and AND-within-`--tag` semantics still apply
+  within their own categories) — asserted via the constructed
+  request(s) sent to the mocked HTTP layer.
+- **Filter-rejection fatal path** (added per targeting design review):
+  a mocked 400 response to a selector-bearing request produces a
+  non-zero exit, a clear stderr message, and no change to a
+  pre-existing `--output` file — same atomicity check as the other
+  fatal-failure tests below.
 - **Mapping/normalize correctness**: field-by-field assertions against
   a fake observation object/dict, mirroring
   `test_normalize_completion_with_content_included`'s exact-dict-equality
@@ -398,24 +584,28 @@ rather than hitting a real API. Coverage to include:
   captures `metergraphrelay pull langfuse --help` output (e.g. via
   `build_parser().parse_args(["pull", "langfuse", "--help"])` catching
   `SystemExit`, or `argparse`'s `format_help()` directly) and asserts it
-  contains every flag from the CLI table above, each flag's stated
-  default, and the env-var relationship text for `--base-url`,
-  `--langfuse-public-key`, and `--langfuse-secret-key`. This is a
-  regression guard: a future flag added/renamed/removed without a
-  matching help-text update fails this test, keeping `--help` from
-  silently drifting away from this spec and the README.
+  contains every flag from the CLI table above — including
+  `--trace-name`/`--tag` and their repeatable/OR/AND semantics as
+  written into the help text — each flag's stated default, and the
+  env-var relationship text for `--base-url`, `--langfuse-public-key`,
+  and `--langfuse-secret-key`. This is a regression guard: a future
+  flag added/renamed/removed without a matching help-text update fails
+  this test, keeping `--help` from silently drifting away from this
+  spec and the README.
 - **Documentation-consistency check** (added per user review): where
   practical, keep README examples from silently rotting relative to the
   implemented interface. Concretely: every `pull langfuse` command shown
-  in the README is parsed (not necessarily executed against a live
-  Langfuse) via `build_parser().parse_args([...])` using the exact flags
-  from that example, asserting it parses without error — so a doc
-  example using a since-renamed/removed flag fails a test instead of
-  quietly going stale. Full end-to-end execution of README examples
-  against live Langfuse data is out of scope for this test (no live
-  credentials in CI, per the "no live Langfuse credentials or network
-  access required" rule above) — parsing/dispatch-level consistency is
-  the practical bar, not live-output equivalence.
+  in the README — including the `--trace-name`/`--tag` example added
+  per "Documentation deliverables → README" above — is parsed (not
+  necessarily executed against a live Langfuse) via
+  `build_parser().parse_args([...])` using the exact flags from that
+  example, asserting it parses without error — so a doc example using a
+  since-renamed/removed flag fails a test instead of quietly going
+  stale. Full end-to-end execution of README examples against live
+  Langfuse data is out of scope for this test (no live credentials in
+  CI, per the "no live Langfuse credentials or network access required"
+  rule above) — parsing/dispatch-level consistency is the practical
+  bar, not live-output equivalence.
 
 ## API freshness / version compatibility
 
@@ -489,6 +679,19 @@ down via docs/spec alone.
 - See "Explicit content-transfer warning" above: this command moves
   prompt/response content by default, with no opt-in gate — the
   privacy-relevant behavior a user most needs to know before running it.
+  Using `--trace-name`/`--tag`/`--environment`/`--since`/`--until` to
+  narrow a pull reduces *how much* content leaves Langfuse per run, but
+  does not change that whatever is pulled is transferred without a
+  separate opt-in step.
+- `--trace-name`/`--tag` values are ordinary CLI arguments, not
+  secrets — unlike credentials (which have an env-preferred path
+  specifically to keep them out of shell history/process listings),
+  they have no such path and aren't expected to need one. Worth noting
+  only if a customer's trace-naming or tagging convention happens to
+  embed sensitive identifiers (e.g. a customer name as a tag) — those
+  values would be visible in shell history/process listings on the
+  machine running the command, the same way any other non-secret CLI
+  argument is.
 
 ## Acceptance criteria / implementation handoff
 
@@ -497,11 +700,21 @@ non-optional parts of this feature's definition of done rather than
 follow-up polish. This feature is complete only when all of the
 following hold:
 
-- [ ] `pull langfuse` is implemented per Architecture, CLI, Mapping, and
-      Failure semantics above.
-- [ ] Tests exist per the Testing section above, including the two
-      documentation-specific items added in this review pass (CLI help
-      content, README example parse-consistency).
+- [ ] `pull langfuse` is implemented per Architecture, CLI, Targeting &
+      filtering, Mapping, and Failure semantics above — including
+      `--trace-name` (repeatable, OR) and `--tag` (repeatable, AND),
+      combined with `--environment`/`--since`/`--until` via AND, applied
+      server-side per the "Targeting & filtering" implementation
+      considerations (exact filter representation confirmed against
+      live Langfuse docs/API before being hardcoded).
+- [ ] Default behavior (no selectors given) is verified unchanged: the
+      latest `--count` GENERATION observations overall, not 100
+      distinct traces.
+- [ ] Tests exist per the Testing section above, including the
+      documentation-specific items (CLI help content, README example
+      parse-consistency) and the targeting-specific items (OR/AND
+      selector semantics, cross-category AND combination, unchanged
+      no-selector default, filter-rejection fatal path).
 - [ ] `README.md` has a `pull langfuse` section covering: quickstart,
       credential/env configuration, Cloud vs. self-hosted host
       configuration, command examples with defaults stated, the v4+
@@ -538,9 +751,24 @@ separate follow-up task.
 - A `--include-content`-style opt-out for content transfer.
 - Client-side request batching (same non-goal already stated for `push`
   in the rebrand spec).
+- **A `--trace-id` selector.** Targeting in v1 is by trace *name* and
+  *tag* only (see "Targeting & filtering"); trace IDs are not required
+  as input anywhere in this design and are not added as a selector.
+  Nothing above precludes adding one later, but it is not part of this
+  spec.
+- Client-side/local post-filtering of any kind as a substitute for
+  server-side selector support — see "Targeting & filtering"'s
+  "Server-side only" requirement.
 
 ## Open questions (carried forward, not blocking this spec)
 
+- Confirm the exact server-side filter representation for
+  `GET /api/public/v2/observations` — discrete query params vs. a
+  generic JSON `filter` param, and its schema if so — before writing
+  the query-construction code for `--trace-name`/`--tag`/
+  `--environment`/`--since`/`--until`. See "Targeting & filtering" for
+  the full detail; listed here too so it isn't missed alongside the
+  other open questions.
 - Confirm exact `usage` field-group key names via live API/OpenAPI spec
   before writing the normalize function.
 - Confirm whether `sessionId` is reliably present via the `trace_context`
