@@ -44,19 +44,125 @@ def build_parser() -> argparse.ArgumentParser:
     pull_anthropic_parser.add_argument("--output", default="./traces.jsonl")
     pull_anthropic_parser.add_argument("--env-file", default=".env")
 
-    pull_langfuse_parser = pull_subparsers.add_parser("langfuse")
-    pull_langfuse_parser.add_argument("-n", "--count", type=int, default=100)
-    pull_langfuse_parser.add_argument("--since", default=None)
-    pull_langfuse_parser.add_argument("--until", default=None)
-    pull_langfuse_parser.add_argument("--trace-name", action="append", default=None)
-    pull_langfuse_parser.add_argument("--tag", action="append", default=None)
-    pull_langfuse_parser.add_argument("--environment", default=None)
-    pull_langfuse_parser.add_argument("--route", default=None)
-    pull_langfuse_parser.add_argument("--base-url", default=None)
-    pull_langfuse_parser.add_argument("--output", default="./traces.jsonl")
-    pull_langfuse_parser.add_argument("--env-file", default=".env")
-    pull_langfuse_parser.add_argument("--langfuse-public-key", default=None)
-    pull_langfuse_parser.add_argument("--langfuse-secret-key", default=None)
+    pull_langfuse_parser = pull_subparsers.add_parser(
+        "langfuse",
+        description=(
+            "Pull Langfuse GENERATION observations (LLM call records) into a "
+            "local JSONL file shaped for metergraph's ingest API. SPAN/EVENT "
+            "observations and scores/evals are not imported. Requires Langfuse "
+            "Cloud or self-hosted v4+ (the v2 Observations API). With no "
+            "--trace-name/--tag/--environment/--since/--until given, imports "
+            "the latest --count GENERATION observations overall. WARNING: "
+            "generation input/output content is transferred from Langfuse "
+            "into the local output file, and from there into metergraph via "
+            "`push`, with no opt-in gate."
+        ),
+        help=(
+            "Pull GENERATION call records from Langfuse (v2 Observations "
+            "API, Cloud/self-hosted v4+); no evals/spans/events"
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "-n",
+        "--count",
+        type=int,
+        default=100,
+        help=(
+            "Maximum number of GENERATION observations to import (never a "
+            "count of distinct traces). (default: 100)"
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "Only import observations at or after this ISO 8601 timestamp "
+            "(Langfuse fromStartTime, inclusive). (default: no lower bound)"
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "Only import observations before this ISO 8601 timestamp "
+            "(Langfuse toStartTime, exclusive). (default: the time this "
+            "command started running, captured once for the whole pull)"
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--trace-name",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Only import generations whose trace name is NAME. Repeatable: "
+            "multiple --trace-name values are OR'd together (any match). "
+            "Combines with --tag/--environment/--since/--until using AND. "
+            "(default: no filter, all trace names)"
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--tag",
+        action="append",
+        default=None,
+        metavar="TAG",
+        help=(
+            "Only import generations whose trace has tag TAG. Repeatable: "
+            "multiple --tag values require ALL given tags to be present "
+            "(AND). Combines with --trace-name/--environment/--since/--until "
+            "using AND. Only matches tags that already exist on the data; "
+            'omitting --tag means no tag filter, not "untagged only". '
+            "(default: no filter, all tags)"
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--environment",
+        default=None,
+        help="Filter to a single Langfuse environment value. (default: no filter, all environments)",
+    )
+    pull_langfuse_parser.add_argument(
+        "--route",
+        default=None,
+        help=(
+            "Override the metergraph route field for every imported row. "
+            "(default: the Langfuse trace name, or the generation's own "
+            "name if the trace has none) Not a selector — see --trace-name "
+            "for filtering which generations are pulled."
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Langfuse API base URL. (default: $LANGFUSE_BASE_URL if set, else Langfuse Cloud)",
+    )
+    pull_langfuse_parser.add_argument(
+        "--output",
+        default="./traces.jsonl",
+        help="Path to write the resulting JSONL file. (default: ./traces.jsonl)",
+    )
+    pull_langfuse_parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Path to a .env file to load credentials from. (default: .env)",
+    )
+    pull_langfuse_parser.add_argument(
+        "--langfuse-public-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Langfuse public key (Basic Auth username). Overrides "
+            "$LANGFUSE_PUBLIC_KEY / .env if given; env/.env is the preferred path."
+        ),
+    )
+    pull_langfuse_parser.add_argument(
+        "--langfuse-secret-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Langfuse secret key (Basic Auth password). Overrides "
+            "$LANGFUSE_SECRET_KEY / .env if given; env/.env is the preferred path."
+        ),
+    )
 
     sync_parser = subparsers.add_parser(
         "sync",

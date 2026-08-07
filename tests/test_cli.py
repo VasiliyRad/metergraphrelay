@@ -1,6 +1,8 @@
 from datetime import datetime
 from unittest.mock import patch
 
+import pytest
+
 from metergraphrelay.cli import build_parser, main
 from metergraphrelay.providers.langfuse import LangfuseAPIError
 
@@ -596,3 +598,49 @@ def test_main_push_uses_custom_ingest_url_from_env(tmp_path):
     mock_push.assert_called_once_with(
         str(trace_file), "tok-123", base_url="http://localhost:8080"
     )
+
+
+def test_pull_langfuse_help_documents_every_flag_and_default(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "langfuse", "--help"])
+
+    # argparse's HelpFormatter word-wraps to terminal width, which can break
+    # a single phrase in the source string (e.g. "OR'd together") across a
+    # newline + indent. Collapse all whitespace runs to single spaces so
+    # substring checks validate the semantic content, not incidental
+    # terminal-width wrapping.
+    help_text = " ".join(capsys.readouterr().out.split())
+
+    for expected in [
+        "--count",
+        "default: 100",
+        "--since",
+        "no lower bound",
+        "--until",
+        "captured once",
+        "--trace-name",
+        "OR'd together",
+        "--tag",
+        "ALL given tags",
+        "--environment",
+        "--route",
+        "Not a selector",
+        "--base-url",
+        "LANGFUSE_BASE_URL",
+        "--output",
+        "./traces.jsonl",
+        "--env-file",
+        ".env",
+        "--langfuse-public-key",
+        "LANGFUSE_PUBLIC_KEY",
+        "--langfuse-secret-key",
+        "LANGFUSE_SECRET_KEY",
+    ]:
+        assert expected in help_text, f"missing {expected!r} in --help output"
+
+
+def test_pull_help_lists_langfuse_subcommand(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "--help"])
+
+    assert "langfuse" in capsys.readouterr().out
