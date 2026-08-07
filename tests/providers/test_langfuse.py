@@ -12,6 +12,7 @@ from metergraphrelay.providers.langfuse import (
     build_base_params,
     build_filter,
     fetch_observations_page,
+    infer_provider,
 )
 
 
@@ -445,3 +446,34 @@ def test_fetch_observations_page_url_encodes_filter_value_with_reserved_characte
     assert "{" not in request.full_url
     assert "}" not in request.full_url
     assert " " not in request.full_url
+
+
+def test_infer_provider_uses_explicit_metadata_when_present():
+    observation = {
+        "metadata": {"provider": "openai"},
+        "providedModelName": "claude-3-opus",
+    }
+    assert infer_provider(observation) == "openai"
+
+
+def test_infer_provider_falls_back_to_model_family_prefix_openai():
+    assert infer_provider({"providedModelName": "gpt-4o-mini"}) == "openai"
+
+
+def test_infer_provider_falls_back_to_model_family_prefix_anthropic():
+    assert infer_provider({"providedModelName": "claude-3-opus"}) == "anthropic"
+
+
+def test_infer_provider_returns_unknown_when_no_match():
+    assert infer_provider({"providedModelName": "some-custom-model"}) == "unknown"
+
+
+def test_infer_provider_returns_unknown_when_model_name_missing():
+    assert infer_provider({}) == "unknown"
+
+
+def test_infer_provider_ignores_non_dict_metadata():
+    assert (
+        infer_provider({"metadata": "not-a-dict", "providedModelName": "gpt-4o"})
+        == "openai"
+    )

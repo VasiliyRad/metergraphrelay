@@ -165,3 +165,28 @@ def fetch_observations_page(
             "Observations API is required)"
         )
     return payload
+
+
+# Illustrative, not exhaustive — per the design spec's Mapping section, the
+# concrete prefix table is an implementation-time task, not invented wholesale.
+_PROVIDER_MODEL_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("gpt-", "openai"),
+    ("o1-", "openai"),
+    ("o3-", "openai"),
+    ("chatgpt-", "openai"),
+    ("claude-", "anthropic"),
+    ("gemini-", "google"),
+)
+
+
+def infer_provider(observation: dict[str, Any]) -> str:
+    metadata = observation.get("metadata")
+    if isinstance(metadata, dict):
+        explicit = metadata.get("provider")
+        if explicit:
+            return explicit
+    model_name = (observation.get("providedModelName") or "").lower()
+    for prefix, provider in _PROVIDER_MODEL_PREFIXES:
+        if model_name.startswith(prefix):
+            return provider
+    return "unknown"
