@@ -158,6 +158,36 @@ def test_build_base_params_filter_omits_optional_safety_conditions_when_absent()
     ]
 
 
+def test_build_base_params_tags_only_triggers_filter_with_safety_conditions():
+    params = build_base_params(
+        until="2026-08-07T00:00:00+00:00",
+        since=None,
+        trace_names=[],
+        tags=["prod"],
+        environment=None,
+    )
+    assert json.loads(params["filter"]) == [
+        {
+            "type": "arrayOptions",
+            "column": "tags",
+            "operator": "all of",
+            "value": ["prod"],
+        },
+        {
+            "type": "stringOptions",
+            "column": "type",
+            "operator": "any of",
+            "value": ["GENERATION"],
+        },
+        {
+            "type": "datetime",
+            "column": "startTime",
+            "operator": "<",
+            "value": "2026-08-07T00:00:00+00:00",
+        },
+    ]
+
+
 def test_build_base_params_omits_individual_params_when_filter_present():
     params = build_base_params(
         until="2026-08-07T00:00:00+00:00",

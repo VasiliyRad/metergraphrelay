@@ -6,12 +6,14 @@ from typing import Any
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 OBSERVATIONS_PATH = "/api/public/v2/observations"
 PAGE_LIMIT = 1000
+GENERATION_TYPE = "GENERATION"
 # core+basic+time cover id/type/name/traceId/startTime/endTime/level/statusMessage/
 # parentObservationId/sessionId; io covers input/output; usage covers usageDetails
 # and totalCost; model covers providedModelName; metadata covers explicit
-# provider metadata (see infer_provider); trace_context denormalizes
-# traceName/tags/environment/release onto each observation. Requesting all of them
-# up front avoids silently missing a field the normalize step depends on.
+# provider metadata used for provider inference in a later task; trace_context
+# denormalizes traceName/tags/environment/release onto each observation.
+# Requesting all of them up front avoids silently missing a field the
+# normalize step depends on.
 RESPONSE_FIELDS = "core,basic,time,io,usage,model,metadata,trace_context"
 
 
@@ -38,11 +40,15 @@ def _selector_conditions(trace_names: list[str], tags: list[str]) -> list[dict[s
     return conditions
 
 
+def _encode_filter(conditions: list[dict[str, Any]]) -> str:
+    return json.dumps(conditions)
+
+
 def build_filter(trace_names: list[str], tags: list[str]) -> str | None:
     conditions = _selector_conditions(trace_names, tags)
     if not conditions:
         return None
-    return json.dumps(conditions)
+    return _encode_filter(conditions)
 
 
 def build_base_params(
@@ -65,7 +71,7 @@ def build_base_params(
                 "type": "stringOptions",
                 "column": "type",
                 "operator": "any of",
-                "value": ["GENERATION"],
+                "value": [GENERATION_TYPE],
             }
         )
         if since:
@@ -94,9 +100,9 @@ def build_base_params(
                     "value": [environment],
                 }
             )
-        params["filter"] = json.dumps(conditions)
+        params["filter"] = _encode_filter(conditions)
     else:
-        params["type"] = "GENERATION"
+        params["type"] = GENERATION_TYPE
         params["toStartTime"] = until
         if since:
             params["fromStartTime"] = since
