@@ -126,12 +126,15 @@ def _auth_header(public_key: str, secret_key: str) -> str:
 
 def fetch_observations_page(
     base_url: str,
+    *,
     public_key: str,
     secret_key: str,
     params: dict[str, str],
 ) -> dict[str, Any]:
     query = urllib.parse.urlencode(params)
-    url = f"{base_url.rstrip('/')}{OBSERVATIONS_PATH}?{query}"
+    url = f"{base_url.rstrip('/')}{OBSERVATIONS_PATH}"
+    if query:
+        url = f"{url}?{query}"
     request = urllib.request.Request(
         url,
         headers={
@@ -153,10 +156,12 @@ def fetch_observations_page(
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
         raise LangfuseAPIError(f"Langfuse API returned invalid JSON: {exc}") from exc
-    if not isinstance(payload, dict) or "data" not in payload or "meta" not in payload:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    if not isinstance(data, list) or not isinstance(meta, dict):
         raise LangfuseAPIError(
-            "Langfuse API response missing 'data'/'meta' — unsupported deployment "
-            "or unexpected response shape (self-hosted v4+ with the v2 "
+            "Langfuse API response missing/malformed 'data'/'meta' — unsupported "
+            "deployment or unexpected response shape (self-hosted v4+ with the v2 "
             "Observations API is required)"
         )
     return payload

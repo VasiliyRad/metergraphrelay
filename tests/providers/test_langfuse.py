@@ -1,6 +1,7 @@
 import base64
 import json
 import urllib.error
+import urllib.parse
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -249,7 +250,10 @@ def test_fetch_observations_page_sends_basic_auth_header():
     ) as mock_urlopen:
         mock_urlopen.return_value = _mock_response(200, body)
         fetch_observations_page(
-            "https://cloud.langfuse.com", "pk-1", "sk-1", {"type": "GENERATION"}
+            "https://cloud.langfuse.com",
+            public_key="pk-1",
+            secret_key="sk-1",
+            params={"type": "GENERATION"},
         )
 
     request = mock_urlopen.call_args.args[0]
@@ -265,9 +269,9 @@ def test_fetch_observations_page_builds_correct_url():
         mock_urlopen.return_value = _mock_response(200, body)
         fetch_observations_page(
             "https://cloud.langfuse.com",
-            "pk-1",
-            "sk-1",
-            {"type": "GENERATION", "limit": "10"},
+            public_key="pk-1",
+            secret_key="sk-1",
+            params={"type": "GENERATION", "limit": "10"},
         )
 
     request = mock_urlopen.call_args.args[0]
@@ -284,7 +288,7 @@ def test_fetch_observations_page_returns_parsed_payload():
     ) as mock_urlopen:
         mock_urlopen.return_value = _mock_response(200, body)
         payload = fetch_observations_page(
-            "https://cloud.langfuse.com", "pk-1", "sk-1", {}
+            "https://cloud.langfuse.com", public_key="pk-1", secret_key="sk-1", params={}
         )
 
     assert payload == {"data": [{"id": "obs-1"}], "meta": {"cursor": "abc"}}
@@ -302,7 +306,12 @@ def test_fetch_observations_page_raises_on_http_error():
             fp=None,
         )
         with pytest.raises(LangfuseAPIError, match="401"):
-            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+            fetch_observations_page(
+                "https://cloud.langfuse.com",
+                public_key="pk-1",
+                secret_key="sk-1",
+                params={},
+            )
 
 
 def test_fetch_observations_page_raises_on_network_error():
@@ -311,7 +320,12 @@ def test_fetch_observations_page_raises_on_network_error():
     ) as mock_urlopen:
         mock_urlopen.side_effect = urllib.error.URLError("connection refused")
         with pytest.raises(LangfuseAPIError, match="connection refused"):
-            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+            fetch_observations_page(
+                "https://cloud.langfuse.com",
+                public_key="pk-1",
+                secret_key="sk-1",
+                params={},
+            )
 
 
 def test_fetch_observations_page_raises_on_malformed_json():
@@ -320,7 +334,12 @@ def test_fetch_observations_page_raises_on_malformed_json():
     ) as mock_urlopen:
         mock_urlopen.return_value = _mock_response(200, b"not json")
         with pytest.raises(LangfuseAPIError, match="invalid JSON"):
-            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+            fetch_observations_page(
+                "https://cloud.langfuse.com",
+                public_key="pk-1",
+                secret_key="sk-1",
+                params={},
+            )
 
 
 def test_fetch_observations_page_raises_when_response_missing_data_or_meta():
@@ -330,4 +349,99 @@ def test_fetch_observations_page_raises_when_response_missing_data_or_meta():
     ) as mock_urlopen:
         mock_urlopen.return_value = _mock_response(200, body)
         with pytest.raises(LangfuseAPIError, match="v4"):
-            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+            fetch_observations_page(
+                "https://cloud.langfuse.com",
+                public_key="pk-1",
+                secret_key="sk-1",
+                params={},
+            )
+
+
+def test_fetch_observations_page_raises_when_data_is_not_a_list():
+    body = json.dumps({"data": {"not": "a list"}, "meta": {"cursor": None}}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        with pytest.raises(LangfuseAPIError, match="v4"):
+            fetch_observations_page(
+                "https://cloud.langfuse.com",
+                public_key="pk-1",
+                secret_key="sk-1",
+                params={},
+            )
+
+
+def test_fetch_observations_page_raises_when_meta_is_not_a_dict():
+    body = json.dumps({"data": [], "meta": "not-a-dict"}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        with pytest.raises(LangfuseAPIError, match="v4"):
+            fetch_observations_page(
+                "https://cloud.langfuse.com",
+                public_key="pk-1",
+                secret_key="sk-1",
+                params={},
+            )
+
+
+def test_fetch_observations_page_rejects_positional_credentials():
+    with patch("metergraphrelay.providers.langfuse.urllib.request.urlopen"):
+        with pytest.raises(TypeError, match="positional argument"):
+            fetch_observations_page(
+                "https://cloud.langfuse.com", "pk-1", "sk-1", {"type": "GENERATION"}
+            )
+
+
+def test_fetch_observations_page_omits_dangling_question_mark_when_params_empty():
+    body = json.dumps({"data": [], "meta": {"cursor": None}}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        fetch_observations_page(
+            "https://cloud.langfuse.com", public_key="pk-1", secret_key="sk-1", params={}
+        )
+
+    request = mock_urlopen.call_args.args[0]
+    assert request.full_url == "https://cloud.langfuse.com/api/public/v2/observations"
+    assert "?" not in request.full_url
+
+
+def test_fetch_observations_page_url_encodes_filter_value_with_reserved_characters():
+    body = json.dumps({"data": [], "meta": {"cursor": None}}).encode()
+    filter_value = json.dumps(
+        [
+            {
+                "type": "stringOptions",
+                "column": "traceName",
+                "operator": "any of",
+                "value": ["support bot/v1"],
+            }
+        ]
+    )
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        fetch_observations_page(
+            "https://cloud.langfuse.com",
+            public_key="pk-1",
+            secret_key="sk-1",
+            params={"filter": filter_value},
+        )
+
+    request = mock_urlopen.call_args.args[0]
+    expected_query = urllib.parse.urlencode({"filter": filter_value})
+    assert request.full_url == (
+        f"https://cloud.langfuse.com/api/public/v2/observations?{expected_query}"
+    )
+    # Independent of the round-trip comparison above: prove specific reserved
+    # characters were actually percent-encoded, not passed through raw.
+    assert "%22" in request.full_url  # encoded "
+    assert "%2F" in request.full_url  # encoded /
+    assert "{" not in request.full_url
+    assert "}" not in request.full_url
+    assert " " not in request.full_url
