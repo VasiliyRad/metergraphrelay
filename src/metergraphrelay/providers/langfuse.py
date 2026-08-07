@@ -395,7 +395,10 @@ def pull_langfuse(
                 if not cursor:
                     break
         os.replace(tmp_path, output_path)
-    except BaseException:
+    finally:
+        # On success, tmp_path has already been moved to output_path by
+        # os.replace above, so this is a harmless no-op (_cleanup_temp_file
+        # silently ignores a missing path); on any failure, this removes the
+        # still-present temp file before the exception propagates.
         _cleanup_temp_file(tmp_path)
-        raise
     return imported, skipped
