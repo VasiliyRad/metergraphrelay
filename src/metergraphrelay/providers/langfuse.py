@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
@@ -109,3 +113,50 @@ def build_base_params(
         if environment:
             params["environment"] = environment
     return params
+
+
+class LangfuseAPIError(Exception):
+    """Raised when Langfuse's API returns an error response or an unusable body."""
+
+
+def _auth_header(public_key: str, secret_key: str) -> str:
+    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    return f"Basic {token}"
+
+
+def fetch_observations_page(
+    base_url: str,
+    public_key: str,
+    secret_key: str,
+    params: dict[str, str],
+) -> dict[str, Any]:
+    query = urllib.parse.urlencode(params)
+    url = f"{base_url.rstrip('/')}{OBSERVATIONS_PATH}?{query}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": _auth_header(public_key, secret_key),
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        raise LangfuseAPIError(
+            f"Langfuse API request failed: HTTP {exc.code} {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise LangfuseAPIError(f"Langfuse API request failed: {exc.reason}") from exc
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise LangfuseAPIError(f"Langfuse API returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict) or "data" not in payload or "meta" not in payload:
+        raise LangfuseAPIError(
+            "Langfuse API response missing 'data'/'meta' — unsupported deployment "
+            "or unexpected response shape (self-hosted v4+ with the v2 "
+            "Observations API is required)"
+        )
+    return payload

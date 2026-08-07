@@ -1,9 +1,16 @@
+import base64
 import json
+import urllib.error
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from metergraphrelay.providers.langfuse import (
+    LangfuseAPIError,
     RESPONSE_FIELDS,
     build_base_params,
     build_filter,
+    fetch_observations_page,
 )
 
 
@@ -224,3 +231,103 @@ def test_build_base_params_never_sends_deprecated_parse_io_as_json():
         environment=None,
     )
     assert "parseIoAsJson" not in params
+
+
+def _mock_response(status, body: bytes):
+    response = MagicMock()
+    response.status = status
+    response.read.return_value = body
+    response.__enter__.return_value = response
+    response.__exit__.return_value = False
+    return response
+
+
+def test_fetch_observations_page_sends_basic_auth_header():
+    body = json.dumps({"data": [], "meta": {"cursor": None}}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        fetch_observations_page(
+            "https://cloud.langfuse.com", "pk-1", "sk-1", {"type": "GENERATION"}
+        )
+
+    request = mock_urlopen.call_args.args[0]
+    expected = "Basic " + base64.b64encode(b"pk-1:sk-1").decode()
+    assert request.get_header("Authorization") == expected
+
+
+def test_fetch_observations_page_builds_correct_url():
+    body = json.dumps({"data": [], "meta": {"cursor": None}}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        fetch_observations_page(
+            "https://cloud.langfuse.com",
+            "pk-1",
+            "sk-1",
+            {"type": "GENERATION", "limit": "10"},
+        )
+
+    request = mock_urlopen.call_args.args[0]
+    assert request.full_url == (
+        "https://cloud.langfuse.com/api/public/v2/observations"
+        "?type=GENERATION&limit=10"
+    )
+
+
+def test_fetch_observations_page_returns_parsed_payload():
+    body = json.dumps({"data": [{"id": "obs-1"}], "meta": {"cursor": "abc"}}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        payload = fetch_observations_page(
+            "https://cloud.langfuse.com", "pk-1", "sk-1", {}
+        )
+
+    assert payload == {"data": [{"id": "obs-1"}], "meta": {"cursor": "abc"}}
+
+
+def test_fetch_observations_page_raises_on_http_error():
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="https://cloud.langfuse.com/api/public/v2/observations",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+        with pytest.raises(LangfuseAPIError, match="401"):
+            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+
+
+def test_fetch_observations_page_raises_on_network_error():
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+        with pytest.raises(LangfuseAPIError, match="connection refused"):
+            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+
+
+def test_fetch_observations_page_raises_on_malformed_json():
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, b"not json")
+        with pytest.raises(LangfuseAPIError, match="invalid JSON"):
+            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
+
+
+def test_fetch_observations_page_raises_when_response_missing_data_or_meta():
+    body = json.dumps({"unexpected": "shape"}).encode()
+    with patch(
+        "metergraphrelay.providers.langfuse.urllib.request.urlopen"
+    ) as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(200, body)
+        with pytest.raises(LangfuseAPIError, match="v4"):
+            fetch_observations_page("https://cloud.langfuse.com", "pk-1", "sk-1", {})
