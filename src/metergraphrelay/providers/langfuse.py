@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -302,6 +303,13 @@ def normalize_observation(
     }
 
 
+def _cleanup_temp_file(tmp_path: str) -> None:
+    try:
+        os.remove(tmp_path)
+    except OSError:
+        pass
+
+
 def pull_langfuse(
     *,
     base_url: str,
@@ -325,46 +333,69 @@ def pull_langfuse(
     )
     imported = 0
     skipped = 0
-    rows: list[str] = []
     cursor: str | None = None
+    used_cursors: set[str] = set()
 
-    while imported < count:
-        page_params = dict(base_params)
-        page_params["limit"] = str(min(PAGE_LIMIT, count - imported))
-        if cursor:
-            page_params["cursor"] = cursor
-        payload = fetch_observations_page(
-            base_url, public_key=public_key, secret_key=secret_key, params=page_params
-        )
-        observations = payload["data"]
-        if not observations:
-            break
-        for observation in observations:
-            if imported >= count:
-                break
-            try:
-                row = normalize_observation(observation, route_override=route)
-            except (KeyError, TypeError, AttributeError) as exc:
-                skipped += 1
-                obs_id = (
-                    observation.get("id", "<unknown>")
-                    if isinstance(observation, dict)
-                    else "<unknown>"
+    output_dir = os.path.dirname(output_path) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        dir=output_dir, prefix=f".{os.path.basename(output_path)}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            while imported < count:
+                page_params = dict(base_params)
+                page_params["limit"] = str(min(PAGE_LIMIT, count - imported))
+                if cursor:
+                    if cursor in used_cursors:
+                        raise LangfuseAPIError(
+                            "Langfuse API returned a repeated pagination cursor "
+                            "(non-advancing pagination), aborting to avoid an "
+                            f"infinite loop: {cursor!r}"
+                        )
+                    used_cursors.add(cursor)
+                    page_params["cursor"] = cursor
+                payload = fetch_observations_page(
+                    base_url,
+                    public_key=public_key,
+                    secret_key=secret_key,
+                    params=page_params,
                 )
-                print(
-                    f"Warning: skipping malformed observation {obs_id}: {exc}",
-                    file=sys.stderr,
-                )
-                continue
-            rows.append(json.dumps(row))
-            imported += 1
-        cursor = payload.get("meta", {}).get("cursor")
-        if not cursor:
-            break
-
-    tmp_path = f"{output_path}.tmp"
-    with open(tmp_path, "w") as f:
-        for line in rows:
-            f.write(line + "\n")
-    os.replace(tmp_path, output_path)
+                observations = payload["data"]
+                if not observations:
+                    break
+                for observation in observations:
+                    if imported >= count:
+                        break
+                    try:
+                        row = normalize_observation(observation, route_override=route)
+                        line = json.dumps(row)
+                    except (KeyError, TypeError, AttributeError) as exc:
+                        skipped += 1
+                        obs_id = (
+                            observation.get("id", "<unknown>")
+                            if isinstance(observation, dict)
+                            else "<unknown>"
+                        )
+                        print(
+                            f"Warning: skipping malformed observation {obs_id}: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    f.write(line + "\n")
+                    imported += 1
+                raw_cursor = payload.get("meta", {}).get("cursor")
+                if raw_cursor is not None and not (
+                    isinstance(raw_cursor, str) and raw_cursor
+                ):
+                    raise LangfuseAPIError(
+                        "Langfuse API returned a malformed pagination cursor: "
+                        f"{raw_cursor!r}"
+                    )
+                cursor = raw_cursor
+                if not cursor:
+                    break
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        _cleanup_temp_file(tmp_path)
+        raise
     return imported, skipped

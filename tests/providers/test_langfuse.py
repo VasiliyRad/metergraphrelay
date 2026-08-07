@@ -1,5 +1,6 @@
 import base64
 import json
+import tempfile
 import urllib.error
 import urllib.parse
 from unittest.mock import MagicMock, patch
@@ -1011,6 +1012,8 @@ def test_pull_langfuse_writes_nothing_when_a_page_request_fails(tmp_path):
             _call_pull_langfuse(output_path)
 
     assert output_path.read_text() == "sentinel-content\n"
+    # No leftover temp file either — cleanup must run on a fetch failure too.
+    assert list(tmp_path.iterdir()) == [output_path]
 
 
 def test_pull_langfuse_writes_via_temp_file_and_leaves_no_leftover(tmp_path):
@@ -1024,7 +1027,9 @@ def test_pull_langfuse_writes_via_temp_file_and_leaves_no_leftover(tmp_path):
         _call_pull_langfuse(output_path)
 
     assert output_path.exists()
-    assert not (tmp_path / "traces.jsonl.tmp").exists()
+    # The temp filename is now uniquely generated (not a fixed ".tmp" suffix),
+    # so assert on the directory contents rather than one specific old name.
+    assert list(tmp_path.iterdir()) == [output_path]
 
 
 def test_pull_langfuse_caps_page_limit_at_remaining_count(tmp_path):
@@ -1053,3 +1058,185 @@ def test_pull_langfuse_caps_page_limit_at_api_maximum(tmp_path):
 
     params = mock_fetch.call_args.kwargs["params"]
     assert params["limit"] == str(PAGE_LIMIT)
+
+
+def test_pull_langfuse_raises_on_repeated_cursor(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    page_1 = {
+        "data": [make_observation(id="obs-1", traceId="trace-1")],
+        "meta": {"cursor": "token-a"},
+    }
+    page_2 = {
+        "data": [make_observation(id="obs-2", traceId="trace-2")],
+        "meta": {"cursor": "token-a"},  # non-advancing: same cursor again
+    }
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        side_effect=[page_1, page_2],
+    ):
+        with pytest.raises(LangfuseAPIError, match="repeated"):
+            _call_pull_langfuse(output_path, count=100)
+
+    assert not output_path.exists()
+
+
+def test_pull_langfuse_raises_on_non_string_cursor(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [make_observation()], "meta": {"cursor": 12345}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ):
+        with pytest.raises(LangfuseAPIError, match="malformed"):
+            _call_pull_langfuse(output_path)
+
+    assert not output_path.exists()
+
+
+def test_pull_langfuse_stops_at_exact_count_without_extra_fetch_when_cursor_present(
+    tmp_path,
+):
+    output_path = tmp_path / "traces.jsonl"
+    observations = [
+        make_observation(id=f"obs-{i}", traceId=f"trace-{i}") for i in range(3)
+    ]
+    payload = {"data": observations, "meta": {"cursor": "more-data-available"}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ) as mock_fetch:
+        imported, skipped = _call_pull_langfuse(output_path, count=3)
+
+    assert imported == 3
+    assert mock_fetch.call_count == 1
+
+
+def test_pull_langfuse_uses_unique_tempfile_in_same_directory(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ), patch(
+        "metergraphrelay.providers.langfuse.tempfile.mkstemp",
+        wraps=tempfile.mkstemp,
+    ) as mock_mkstemp:
+        _call_pull_langfuse(output_path)
+
+    mock_mkstemp.assert_called_once()
+    assert mock_mkstemp.call_args.kwargs["dir"] == str(tmp_path)
+
+
+def test_pull_langfuse_temp_file_name_differs_across_invocations(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+    seen_tmp_paths = []
+    real_mkstemp = tempfile.mkstemp
+
+    def spy_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        seen_tmp_paths.append(path)
+        return fd, path
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ), patch(
+        "metergraphrelay.providers.langfuse.tempfile.mkstemp",
+        side_effect=spy_mkstemp,
+    ):
+        _call_pull_langfuse(output_path)
+        _call_pull_langfuse(output_path)
+
+    assert len(seen_tmp_paths) == 2
+    assert seen_tmp_paths[0] != seen_tmp_paths[1]
+
+
+def test_pull_langfuse_cleans_up_temp_file_on_write_failure(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [make_observation()], "meta": {"cursor": None}}
+
+    mock_file = MagicMock()
+    mock_file.write.side_effect = OSError("disk full")
+    mock_file.__enter__.return_value = mock_file
+    mock_file.__exit__.return_value = False
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ), patch(
+        "metergraphrelay.providers.langfuse.os.fdopen", return_value=mock_file
+    ):
+        with pytest.raises(OSError):
+            _call_pull_langfuse(output_path)
+
+    assert not output_path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_pull_langfuse_cleans_up_temp_file_on_replace_failure(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ), patch(
+        "metergraphrelay.providers.langfuse.os.replace",
+        side_effect=OSError("permission denied"),
+    ):
+        with pytest.raises(OSError):
+            _call_pull_langfuse(output_path)
+
+    assert not output_path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_pull_langfuse_cleans_up_temp_file_on_uncaught_normalize_error(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [make_observation()], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ), patch(
+        "metergraphrelay.providers.langfuse.normalize_observation",
+        side_effect=RuntimeError("unexpected bug"),
+    ):
+        with pytest.raises(RuntimeError):
+            _call_pull_langfuse(output_path)
+
+    assert not output_path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_pull_langfuse_treats_json_dumps_failure_as_malformed_row_skip(
+    tmp_path, capsys
+):
+    output_path = tmp_path / "traces.jsonl"
+    good = make_observation(id="obs-good", traceId="trace-1")
+    bad = make_observation(id="obs-bad", traceId="trace-2")
+    payload = {"data": [bad, good], "meta": {"cursor": None}}
+    real_dumps = json.dumps
+
+    def flaky_dumps(obj, *args, **kwargs):
+        if isinstance(obj, dict) and obj.get("request_id") == "obs-bad":
+            raise TypeError("not serializable")
+        return real_dumps(obj, *args, **kwargs)
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ), patch(
+        "metergraphrelay.providers.langfuse.json.dumps", side_effect=flaky_dumps
+    ):
+        imported, skipped = _call_pull_langfuse(output_path)
+
+    assert imported == 1
+    assert skipped == 1
+    captured = capsys.readouterr()
+    assert "obs-bad" in captured.err
