@@ -502,6 +502,17 @@ def test_infer_provider_falls_back_to_model_family_prefix_google():
     assert infer_provider({"providedModelName": "gemini-1.5-pro"}) == "google"
 
 
+def test_infer_provider_uses_model_field_as_primary():
+    # Live v4 Observations API evidence: the model name comes back on the
+    # `model` field, with `providedModelName` observed as None in practice.
+    assert infer_provider({"model": "gpt-4o-mini"}) == "openai"
+
+
+def test_infer_provider_model_field_takes_precedence_over_provided_model_name():
+    observation = {"model": "gpt-4o-mini", "providedModelName": "claude-3-opus"}
+    assert infer_provider(observation) == "openai"
+
+
 def test_infer_provider_explicit_metadata_takes_precedence_over_model_prefix():
     observation = {
         "metadata": {"provider": "custom-provider"},
@@ -816,6 +827,44 @@ def test_normalize_observation_non_string_model_becomes_none():
     row = normalize_observation(observation, route_override=None)
 
     assert row["model"] is None
+
+
+def test_normalize_observation_maps_model_field():
+    # Live v4 Observations API evidence: model comes back on `model`
+    # (observed values like "gpt-4o-mini" / "claude-3-5-haiku-latest"),
+    # with `providedModelName` observed as None in practice.
+    observation = make_observation(model="gpt-4o-mini", providedModelName=None)
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["model"] == "gpt-4o-mini"
+    assert row["provider"] == "openai"
+
+
+def test_normalize_observation_model_field_takes_precedence_over_provided_model_name():
+    observation = make_observation(
+        model="gpt-4o-mini", providedModelName="claude-3-opus"
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["model"] == "gpt-4o-mini"
+
+
+def test_normalize_observation_falls_back_to_provided_model_name_when_model_missing():
+    observation = make_observation(model=None, providedModelName="gpt-4o-mini")
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["model"] == "gpt-4o-mini"
+
+
+def test_normalize_observation_non_string_model_falls_back_to_provided_model_name():
+    observation = make_observation(model=12345, providedModelName="claude-3-opus")
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["model"] == "claude-3-opus"
 
 
 def test_normalize_observation_non_string_status_message_becomes_none_error_type():

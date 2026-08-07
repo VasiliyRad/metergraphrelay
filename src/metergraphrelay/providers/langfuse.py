@@ -18,7 +18,8 @@ PAGE_LIMIT = 1000
 GENERATION_TYPE = "GENERATION"
 # core+basic+time cover id/type/name/traceId/startTime/endTime/level/statusMessage/
 # parentObservationId/sessionId; io covers input/output; usage covers usageDetails
-# and totalCost; model covers providedModelName; metadata covers explicit
+# and totalCost; model covers the model name (returned as `model` in
+# practice, with `providedModelName` as a fallback); metadata covers explicit
 # provider metadata used for provider inference in a later task; trace_context
 # denormalizes traceName/tags/environment/release onto each observation.
 # Requesting all of them up front avoids silently missing a field the
@@ -184,6 +185,18 @@ _PROVIDER_MODEL_PREFIXES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _resolve_model_name(observation: dict[str, Any]) -> str | None:
+    # Live v4 Observations API evidence: model comes back on `model`
+    # (e.g. "gpt-4o-mini", "claude-3-5-haiku-latest"), with `providedModelName`
+    # observed as None in practice. `providedModelName` is kept as a fallback
+    # for robustness, not as the primary source.
+    for key in ("model", "providedModelName"):
+        value = observation.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def infer_provider(observation: dict[str, Any]) -> str:
     metadata = observation.get("metadata")
     if isinstance(metadata, dict):
@@ -192,8 +205,7 @@ def infer_provider(observation: dict[str, Any]) -> str:
             explicit = explicit.strip().lower()
             if explicit:
                 return explicit
-    raw_model_name = observation.get("providedModelName")
-    model_name = raw_model_name.lower() if isinstance(raw_model_name, str) else ""
+    model_name = (_resolve_model_name(observation) or "").lower()
     for prefix, provider in _PROVIDER_MODEL_PREFIXES:
         if model_name.startswith(prefix):
             return provider
@@ -272,8 +284,7 @@ def normalize_observation(
     request_json, request_text = _map_content(observation.get("input"))
     response_text = _response_text(observation.get("output"))
 
-    raw_model = observation.get("providedModelName")
-    model = raw_model if isinstance(raw_model, str) else None
+    model = _resolve_model_name(observation)
 
     return {
         "ts": observation["startTime"],
