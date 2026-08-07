@@ -202,11 +202,14 @@ def _is_chat_message_list(value: Any) -> bool:
     )
 
 
+_JSON_PARSE_FAILED = object()
+
+
 def _try_parse_json(value: str) -> Any:
     try:
         return json.loads(value)
     except json.JSONDecodeError:
-        return None
+        return _JSON_PARSE_FAILED
 
 
 def _map_content(input_value: Any) -> tuple[str | None, str | None]:
@@ -223,6 +226,8 @@ def _map_content(input_value: Any) -> tuple[str | None, str | None]:
 
 
 def _response_text(output_value: Any) -> str | None:
+    # No response_json field exists in metergraph's native row — JSON-shaped
+    # output is serialized into this single field instead of split like input.
     if output_value is None:
         return None
     if isinstance(output_value, str):

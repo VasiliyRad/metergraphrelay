@@ -648,3 +648,29 @@ def test_response_text_serializes_number():
 
 def test_response_text_serializes_bool():
     assert _response_text(True) == json.dumps(True)
+
+
+def test_map_content_raw_json_null_string_stays_byte_for_byte():
+    raw = "null"
+    assert _map_content(raw) == (None, raw)
+
+
+def test_map_content_raw_json_empty_list_string_stays_byte_for_byte():
+    raw = "[]"
+    assert _map_content(raw) == (None, raw)
+
+
+def test_map_content_raw_json_mixed_valid_invalid_message_list_stays_byte_for_byte():
+    raw = json.dumps([{"role": "user", "content": "hi"}, "not-a-message"])
+    assert _map_content(raw) == (None, raw)
+
+
+def test_map_content_empty_list_value_becomes_request_text_as_json():
+    result = _map_content([])
+    assert result == (None, json.dumps([]))
+
+
+def test_map_content_mixed_valid_invalid_message_list_value_becomes_request_text_as_json():
+    mixed = [{"role": "user", "content": "hi"}, "not-a-dict"]
+    result = _map_content(mixed)
+    assert result == (None, json.dumps(mixed))
