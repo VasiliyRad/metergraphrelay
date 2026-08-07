@@ -5,6 +5,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
 from .config import ConfigError, require_credentials
@@ -106,6 +107,11 @@ def _not_implemented(provider: str) -> int:
 
 
 def _resolve_langfuse_credentials(args: argparse.Namespace) -> tuple[str, str]:
+    # Load the selected --env-file unconditionally, even when CLI credential
+    # flags are given below and its own credentials go unused — other
+    # settings (e.g. LANGFUSE_BASE_URL) may still live only in that file, not
+    # the real process environment, and must still resolve.
+    load_dotenv(args.env_file, override=True)
     if args.langfuse_public_key and args.langfuse_secret_key:
         return args.langfuse_public_key, args.langfuse_secret_key
     creds = require_credentials("langfuse", args.env_file)
@@ -117,7 +123,9 @@ def _run_pull_langfuse(args: argparse.Namespace) -> int:
         public_key, secret_key = _resolve_langfuse_credentials(args)
     except ConfigError as exc:
         return _config_error(exc)
-    base_url = args.base_url or os.environ.get("LANGFUSE_HOST") or DEFAULT_LANGFUSE_HOST
+    base_url = (
+        args.base_url or os.environ.get("LANGFUSE_BASE_URL") or DEFAULT_LANGFUSE_HOST
+    )
     until = args.until or datetime.now(timezone.utc).isoformat()
     try:
         imported, skipped = pull_langfuse(

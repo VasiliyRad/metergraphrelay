@@ -171,11 +171,43 @@ def test_main_pull_langfuse_credential_flags_override_env(tmp_path):
     assert mock_pull.call_args.kwargs["secret_key"] == "sk-cli"
 
 
+def test_main_pull_langfuse_base_url_from_env_file_resolves_with_cli_credential_flags(
+    tmp_path,
+):
+    # LANGFUSE_BASE_URL lives only in the selected --env-file, not the real
+    # process environment. Supplying credentials via CLI flags must not skip
+    # loading that file, or this value would never be seen.
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_BASE_URL=https://env-file-host.example.com\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--langfuse-public-key",
+                "pk-cli",
+                "--langfuse-secret-key",
+                "sk-cli",
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert (
+        mock_pull.call_args.kwargs["base_url"] == "https://env-file-host.example.com"
+    )
+
+
 def test_main_pull_langfuse_base_url_flag_takes_precedence_over_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n"
-        "LANGFUSE_HOST=https://env-host.example.com\n"
+        "LANGFUSE_BASE_URL=https://env-host.example.com\n"
     )
 
     with patch(
@@ -197,11 +229,11 @@ def test_main_pull_langfuse_base_url_flag_takes_precedence_over_env(tmp_path):
     assert mock_pull.call_args.kwargs["base_url"] == "https://cli-host.example.com"
 
 
-def test_main_pull_langfuse_base_url_falls_back_to_langfuse_host_env(tmp_path):
+def test_main_pull_langfuse_base_url_falls_back_to_langfuse_base_url_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n"
-        "LANGFUSE_HOST=https://env-host.example.com\n"
+        "LANGFUSE_BASE_URL=https://env-host.example.com\n"
     )
 
     with patch(
