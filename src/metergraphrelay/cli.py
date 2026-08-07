@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 
 from openai import OpenAI
 
 from .config import ConfigError, require_credentials
 from .demo import run_demo
+from .providers.langfuse import DEFAULT_LANGFUSE_HOST, LangfuseAPIError, pull_langfuse
 from .providers.openai import pull_openai
 from .push import push_file
 
@@ -42,8 +44,18 @@ def build_parser() -> argparse.ArgumentParser:
     pull_anthropic_parser.add_argument("--env-file", default=".env")
 
     pull_langfuse_parser = pull_subparsers.add_parser("langfuse")
+    pull_langfuse_parser.add_argument("-n", "--count", type=int, default=100)
+    pull_langfuse_parser.add_argument("--since", default=None)
+    pull_langfuse_parser.add_argument("--until", default=None)
+    pull_langfuse_parser.add_argument("--trace-name", action="append", default=None)
+    pull_langfuse_parser.add_argument("--tag", action="append", default=None)
+    pull_langfuse_parser.add_argument("--environment", default=None)
+    pull_langfuse_parser.add_argument("--route", default=None)
+    pull_langfuse_parser.add_argument("--base-url", default=None)
     pull_langfuse_parser.add_argument("--output", default="./traces.jsonl")
     pull_langfuse_parser.add_argument("--env-file", default=".env")
+    pull_langfuse_parser.add_argument("--langfuse-public-key", default=None)
+    pull_langfuse_parser.add_argument("--langfuse-secret-key", default=None)
 
     sync_parser = subparsers.add_parser(
         "sync",
@@ -93,16 +105,54 @@ def _not_implemented(provider: str) -> int:
     return 1
 
 
+def _resolve_langfuse_credentials(args: argparse.Namespace) -> tuple[str, str]:
+    if args.langfuse_public_key and args.langfuse_secret_key:
+        return args.langfuse_public_key, args.langfuse_secret_key
+    creds = require_credentials("langfuse", args.env_file)
+    return creds["LANGFUSE_PUBLIC_KEY"], creds["LANGFUSE_SECRET_KEY"]
+
+
+def _run_pull_langfuse(args: argparse.Namespace) -> int:
+    try:
+        public_key, secret_key = _resolve_langfuse_credentials(args)
+    except ConfigError as exc:
+        return _config_error(exc)
+    base_url = args.base_url or os.environ.get("LANGFUSE_HOST") or DEFAULT_LANGFUSE_HOST
+    until = args.until or datetime.now(timezone.utc).isoformat()
+    try:
+        imported, skipped = pull_langfuse(
+            base_url=base_url,
+            public_key=public_key,
+            secret_key=secret_key,
+            count=args.count,
+            since=args.since,
+            until=until,
+            trace_names=args.trace_name or [],
+            tags=args.tag or [],
+            environment=args.environment,
+            route=args.route,
+            output_path=args.output,
+        )
+    except (LangfuseAPIError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Imported {imported} trace(s), skipped {skipped}, to {args.output}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "pull" and args.provider in {"anthropic", "langfuse"}:
+    if args.command == "pull" and args.provider == "anthropic":
         try:
             require_credentials(args.provider, args.env_file)
         except ConfigError as exc:
             return _config_error(exc)
         return _not_implemented(args.provider)
+
+    if args.command == "pull" and args.provider == "langfuse":
+        return _run_pull_langfuse(args)
 
     if args.command == "pull" and args.provider == "openai":
         try:

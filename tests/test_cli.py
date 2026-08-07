@@ -1,6 +1,8 @@
+from datetime import datetime
 from unittest.mock import patch
 
-from metergraphrelay.cli import main
+from metergraphrelay.cli import build_parser, main
+from metergraphrelay.providers.langfuse import LangfuseAPIError
 
 
 def test_main_pull_openai_missing_credential_returns_error(tmp_path, capsys):
@@ -104,18 +106,254 @@ def test_main_pull_langfuse_missing_credential_returns_error(tmp_path, capsys):
     assert "LANGFUSE_SECRET_KEY" in captured.err
 
 
-def test_main_pull_langfuse_reports_not_implemented_when_credentials_present(
-    tmp_path, capsys
-):
+def test_main_pull_langfuse_dispatches_to_pull_langfuse(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
+    output_path = tmp_path / "out.jsonl"
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(5, 1)
+    ) as mock_pull:
+        exit_code = main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "-n",
+                "5",
+                "--output",
+                str(output_path),
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert exit_code == 0
+    mock_pull.assert_called_once_with(
+        base_url="https://cloud.langfuse.com",
+        public_key="pk-1",
+        secret_key="sk-1",
+        count=5,
+        since=None,
+        until="2026-08-07T00:00:00+00:00",
+        trace_names=[],
+        tags=[],
+        environment=None,
+        route=None,
+        output_path=str(output_path),
+    )
+
+
+def test_main_pull_langfuse_credential_flags_override_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--langfuse-public-key",
+                "pk-cli",
+                "--langfuse-secret-key",
+                "sk-cli",
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["public_key"] == "pk-cli"
+    assert mock_pull.call_args.kwargs["secret_key"] == "sk-cli"
+
+
+def test_main_pull_langfuse_base_url_flag_takes_precedence_over_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n"
+        "LANGFUSE_HOST=https://env-host.example.com\n"
+    )
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--base-url",
+                "https://cli-host.example.com",
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["base_url"] == "https://cli-host.example.com"
+
+
+def test_main_pull_langfuse_base_url_falls_back_to_langfuse_host_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n"
+        "LANGFUSE_HOST=https://env-host.example.com\n"
+    )
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["base_url"] == "https://env-host.example.com"
+
+
+def test_main_pull_langfuse_base_url_defaults_to_langfuse_cloud(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
 
-    exit_code = main(["pull", "langfuse", "--env-file", str(env_file)])
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["base_url"] == "https://cloud.langfuse.com"
+
+
+def test_main_pull_langfuse_until_defaults_to_command_start_time(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(["pull", "langfuse", "--env-file", str(env_file)])
+
+    until_value = mock_pull.call_args.kwargs["until"]
+    assert until_value is not None
+    datetime.fromisoformat(until_value)
+
+
+def test_main_pull_langfuse_repeatable_trace_name_and_tag(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--trace-name",
+                "support-bot",
+                "--trace-name",
+                "billing-bot",
+                "--tag",
+                "prod",
+                "--tag",
+                "tier-1",
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["trace_names"] == ["support-bot", "billing-bot"]
+    assert mock_pull.call_args.kwargs["tags"] == ["prod", "tier-1"]
+
+
+def test_main_pull_langfuse_default_count_is_100(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["count"] == 100
+
+
+def test_main_pull_langfuse_prints_imported_and_skipped_summary(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
+
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(7, 2)):
+        exit_code = main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "7" in captured.out
+    assert "2" in captured.out
+
+
+def test_main_pull_langfuse_api_error_returns_clean_exit_code(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_langfuse",
+        side_effect=LangfuseAPIError(
+            "Langfuse API request failed: HTTP 400 Bad Request"
+        ),
+    ):
+        exit_code = main(
+            [
+                "pull",
+                "langfuse",
+                "--env-file",
+                str(env_file),
+                "--until",
+                "2026-08-07T00:00:00+00:00",
+            ]
+        )
 
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert "not implemented" in captured.err.lower()
-    assert "langfuse" in captured.err.lower()
+    assert captured.err.startswith("Error: ")
+    assert "400" in captured.err
 
 
 def test_main_demo_openai_dispatches_to_run_demo(tmp_path):
