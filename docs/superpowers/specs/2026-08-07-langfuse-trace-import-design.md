@@ -254,8 +254,9 @@ Each GENERATION observation → one metergraph-native row:
 | metergraph field | source | notes |
 |---|---|---|
 | `ts` | `startTime` | ISO 8601, ISO-fromatted directly from Langfuse's own timestamp — no reinterpretation needed (unlike OpenAI's Unix-epoch `created`) |
-| `sdk` | fixed `"langfuse"` | **Deliberate divergence** from `pull openai`, where `sdk` is always `"metergraphrelay"` (identifying the relay tool itself). Here it identifies the *upstream observability source* the row was relayed from, which matters more for a customer reconciling data across multiple import paths. Flagged as an open question below — confirm this reading of the field's intended semantics against metergraph's server-side expectations before implementation. |
-| `sdk_version` | this tool's `__version__` | unchanged convention from `pull openai` |
+| `source` | fixed `"langfuse"` | **Resolved per user review** (was an open question). Records which observability platform this row was relayed *through* — Langfuse — distinct from `provider` (the underlying LLM vendor) and from `sdk` (the relay tool). `source` is not one of metergraph's first-class `CALL_COLUMNS`; verified against `metergraph-internal/app/src/metergraph_app/worker/main.py:97-101,336-344,408`, any row field outside the worker's `KNOWN_FIELDS` set is captured automatically into that row's freeform `meta` JSON blob rather than dropped — so `source="langfuse"` needs no server-side schema change, but is queryable via `meta`, not as a dedicated column, unlike `provider`. |
+| `sdk` | fixed `"metergraphrelay"` | **Unchanged from `pull openai`'s existing convention** — identifies the relay tool that produced the row, exactly as it does for the OpenAI path. Langfuse generally cannot reliably identify which SDK (if any) the original application used to call the LLM — trace/observation data doesn't carry that provenance — so `sdk` continues to mean "the tool that performed this pull," never "the caller's original instrumentation," for every provider this tool supports. |
+| `sdk_version` | this tool's `__version__` (the running relay's version) | unchanged convention from `pull openai` |
 | `provider` | (1) explicit provider metadata on the observation/trace if Langfuse has captured one, else (2) conservative model-family inference from `providedModelName` (e.g. a `gpt-`/`o1-`/`o3-` prefix → `"openai"`, `claude-` → `"anthropic"` — illustrative, not exhaustive; the concrete prefix table is an implementation-time task, not invented here), else (3) literal `"unknown"` | Never silently mis-assign a provider; `"unknown"` is a valid, honest output |
 | `model` | `providedModelName` | the model name as the caller originally supplied it to Langfuse, not any internally-canonicalized name |
 | `input_tokens` / `output_tokens` | `usage` field group | **Unverified exact key names** inside the `usage` object (Langfuse's v2 docs confirm a `usage` field group exists and covers token/cost data, but the precise field names weren't confirmed via API docs in this pass — approved for later per §"API freshness" below); implementation must confirm against a live `fields=usage` response before writing the normalize function |
@@ -540,11 +541,6 @@ separate follow-up task.
 
 ## Open questions (carried forward, not blocking this spec)
 
-- Confirm the intended semantics of the `sdk` field with metergraph's
-  server-side consumers before implementation — this design uses it to
-  mean "upstream source" (`"langfuse"`) rather than "relay tool"
-  (`"metergraphrelay"`), a deliberate divergence from `pull openai`'s
-  usage of the same field.
 - Confirm exact `usage` field-group key names via live API/OpenAPI spec
   before writing the normalize function.
 - Confirm whether `sessionId` is reliably present via the `trace_context`
