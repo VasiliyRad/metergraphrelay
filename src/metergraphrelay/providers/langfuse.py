@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -298,3 +300,71 @@ def normalize_observation(
         "session_id": observation.get("sessionId"),
         "environment": observation.get("environment"),
     }
+
+
+def pull_langfuse(
+    *,
+    base_url: str,
+    public_key: str,
+    secret_key: str,
+    count: int,
+    since: str | None,
+    until: str,
+    trace_names: list[str],
+    tags: list[str],
+    environment: str | None,
+    route: str | None,
+    output_path: str,
+) -> tuple[int, int]:
+    base_params = build_base_params(
+        until=until,
+        since=since,
+        trace_names=trace_names,
+        tags=tags,
+        environment=environment,
+    )
+    imported = 0
+    skipped = 0
+    rows: list[str] = []
+    cursor: str | None = None
+
+    while imported < count:
+        page_params = dict(base_params)
+        page_params["limit"] = str(min(PAGE_LIMIT, count - imported))
+        if cursor:
+            page_params["cursor"] = cursor
+        payload = fetch_observations_page(
+            base_url, public_key=public_key, secret_key=secret_key, params=page_params
+        )
+        observations = payload["data"]
+        if not observations:
+            break
+        for observation in observations:
+            if imported >= count:
+                break
+            try:
+                row = normalize_observation(observation, route_override=route)
+            except (KeyError, TypeError, AttributeError) as exc:
+                skipped += 1
+                obs_id = (
+                    observation.get("id", "<unknown>")
+                    if isinstance(observation, dict)
+                    else "<unknown>"
+                )
+                print(
+                    f"Warning: skipping malformed observation {obs_id}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            rows.append(json.dumps(row))
+            imported += 1
+        cursor = payload.get("meta", {}).get("cursor")
+        if not cursor:
+            break
+
+    tmp_path = f"{output_path}.tmp"
+    with open(tmp_path, "w") as f:
+        for line in rows:
+            f.write(line + "\n")
+    os.replace(tmp_path, output_path)
+    return imported, skipped

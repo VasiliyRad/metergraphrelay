@@ -8,6 +8,7 @@ import pytest
 
 from metergraphrelay import __version__
 from metergraphrelay.providers.langfuse import (
+    PAGE_LIMIT,
     LangfuseAPIError,
     RESPONSE_FIELDS,
     _map_content,
@@ -17,6 +18,7 @@ from metergraphrelay.providers.langfuse import (
     fetch_observations_page,
     infer_provider,
     normalize_observation,
+    pull_langfuse,
 )
 
 
@@ -821,3 +823,233 @@ def test_normalize_observation_non_string_status_message_becomes_none_error_type
     row = normalize_observation(observation, route_override=None)
 
     assert row["error_type"] is None
+
+
+def _call_pull_langfuse(output_path, **overrides):
+    kwargs = dict(
+        base_url="https://cloud.langfuse.com",
+        public_key="pk-1",
+        secret_key="sk-1",
+        count=10,
+        since=None,
+        until="2026-08-07T00:00:00+00:00",
+        trace_names=[],
+        tags=[],
+        environment=None,
+        route=None,
+        output_path=str(output_path),
+    )
+    kwargs.update(overrides)
+    return pull_langfuse(**kwargs)
+
+
+def test_pull_langfuse_single_page_under_count(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    observations = [
+        make_observation(id=f"obs-{i}", traceId=f"trace-{i}") for i in range(3)
+    ]
+    payload = {"data": observations, "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ) as mock_fetch:
+        imported, skipped = _call_pull_langfuse(output_path)
+
+    assert imported == 3
+    assert skipped == 0
+    mock_fetch.assert_called_once()
+    assert len(output_path.read_text().splitlines()) == 3
+
+
+def test_pull_langfuse_stops_at_count_cap_mid_page(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    observations = [
+        make_observation(id=f"obs-{i}", traceId=f"trace-{i}") for i in range(5)
+    ]
+    payload = {"data": observations, "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ):
+        imported, skipped = _call_pull_langfuse(output_path, count=2)
+
+    assert imported == 2
+    assert len(output_path.read_text().splitlines()) == 2
+
+
+def test_pull_langfuse_stops_when_page_is_empty(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ) as mock_fetch:
+        imported, skipped = _call_pull_langfuse(output_path)
+
+    assert imported == 0
+    assert mock_fetch.call_count == 1
+
+
+def test_pull_langfuse_follows_cursor_across_pages(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    page_1 = {
+        "data": [make_observation(id="obs-1", traceId="trace-1")],
+        "meta": {"cursor": "next-page-token"},
+    }
+    page_2 = {
+        "data": [make_observation(id="obs-2", traceId="trace-2")],
+        "meta": {"cursor": None},
+    }
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        side_effect=[page_1, page_2],
+    ) as mock_fetch:
+        imported, skipped = _call_pull_langfuse(output_path)
+
+    assert imported == 2
+    assert mock_fetch.call_count == 2
+    second_call_params = mock_fetch.call_args_list[1].kwargs["params"]
+    assert second_call_params["cursor"] == "next-page-token"
+
+
+def test_pull_langfuse_passes_selectors_into_a_single_combined_request(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ) as mock_fetch:
+        _call_pull_langfuse(
+            output_path,
+            since="2026-08-01T00:00:00+00:00",
+            trace_names=["support-bot"],
+            tags=["prod"],
+            environment="production",
+        )
+
+    params = mock_fetch.call_args.kwargs["params"]
+    # build_base_params folds type/time/environment into the filter array
+    # whenever a selector is present (Task 1 quality-round correction) — the
+    # standalone query params are not sent in that case.
+    assert "fromStartTime" not in params
+    assert "toStartTime" not in params
+    assert "environment" not in params
+    assert json.loads(params["filter"]) == [
+        {
+            "type": "stringOptions",
+            "column": "traceName",
+            "operator": "any of",
+            "value": ["support-bot"],
+        },
+        {
+            "type": "arrayOptions",
+            "column": "tags",
+            "operator": "all of",
+            "value": ["prod"],
+        },
+        {
+            "type": "stringOptions",
+            "column": "type",
+            "operator": "any of",
+            "value": ["GENERATION"],
+        },
+        {
+            "type": "datetime",
+            "column": "startTime",
+            "operator": ">=",
+            "value": "2026-08-01T00:00:00+00:00",
+        },
+        {
+            "type": "datetime",
+            "column": "startTime",
+            "operator": "<",
+            "value": "2026-08-07T00:00:00+00:00",
+        },
+        {
+            "type": "stringOptions",
+            "column": "environment",
+            "operator": "any of",
+            "value": ["production"],
+        },
+    ]
+
+
+def test_pull_langfuse_skips_malformed_observation_and_continues(tmp_path, capsys):
+    output_path = tmp_path / "traces.jsonl"
+    good = make_observation(id="obs-good", traceId="trace-1")
+    bad = make_observation(id="obs-bad", traceId="trace-2")
+    del bad["startTime"]
+    payload = {"data": [bad, good], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ):
+        imported, skipped = _call_pull_langfuse(output_path)
+
+    assert imported == 1
+    assert skipped == 1
+    captured = capsys.readouterr()
+    assert "obs-bad" in captured.err
+    assert len(output_path.read_text().splitlines()) == 1
+
+
+def test_pull_langfuse_writes_nothing_when_a_page_request_fails(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    output_path.write_text("sentinel-content\n")
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        side_effect=LangfuseAPIError("boom"),
+    ):
+        with pytest.raises(LangfuseAPIError):
+            _call_pull_langfuse(output_path)
+
+    assert output_path.read_text() == "sentinel-content\n"
+
+
+def test_pull_langfuse_writes_via_temp_file_and_leaves_no_leftover(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [make_observation()], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ):
+        _call_pull_langfuse(output_path)
+
+    assert output_path.exists()
+    assert not (tmp_path / "traces.jsonl.tmp").exists()
+
+
+def test_pull_langfuse_caps_page_limit_at_remaining_count(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ) as mock_fetch:
+        _call_pull_langfuse(output_path, count=5)
+
+    params = mock_fetch.call_args.kwargs["params"]
+    assert params["limit"] == "5"
+
+
+def test_pull_langfuse_caps_page_limit_at_api_maximum(tmp_path):
+    output_path = tmp_path / "traces.jsonl"
+    payload = {"data": [], "meta": {"cursor": None}}
+
+    with patch(
+        "metergraphrelay.providers.langfuse.fetch_observations_page",
+        return_value=payload,
+    ) as mock_fetch:
+        _call_pull_langfuse(output_path, count=5000)
+
+    params = mock_fetch.call_args.kwargs["params"]
+    assert params["limit"] == str(PAGE_LIMIT)
