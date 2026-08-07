@@ -184,10 +184,11 @@ def infer_provider(observation: dict[str, Any]) -> str:
     if isinstance(metadata, dict):
         explicit = metadata.get("provider")
         if isinstance(explicit, str):
-            explicit = explicit.strip()
+            explicit = explicit.strip().lower()
             if explicit:
                 return explicit
-    model_name = (observation.get("providedModelName") or "").lower()
+    raw_model_name = observation.get("providedModelName")
+    model_name = raw_model_name.lower() if isinstance(raw_model_name, str) else ""
     for prefix, provider in _PROVIDER_MODEL_PREFIXES:
         if model_name.startswith(prefix):
             return provider

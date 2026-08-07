@@ -503,25 +503,22 @@ def test_infer_provider_explicit_metadata_takes_precedence_over_model_prefix():
     assert infer_provider(observation) == "custom-provider"
 
 
-def test_infer_provider_ignores_malformed_explicit_provider_int():
-    observation = {"metadata": {"provider": 42}, "providedModelName": "gpt-4o-mini"}
-    assert infer_provider(observation) == "openai"
-
-
-def test_infer_provider_ignores_malformed_explicit_provider_list():
+@pytest.mark.parametrize(
+    "malformed_provider, model_name, expected_provider",
+    [
+        (42, "gpt-4o-mini", "openai"),
+        (["openai"], "claude-3-opus", "anthropic"),
+        ({"name": "openai"}, "gemini-pro", "google"),
+    ],
+)
+def test_infer_provider_ignores_malformed_explicit_provider(
+    malformed_provider, model_name, expected_provider
+):
     observation = {
-        "metadata": {"provider": ["openai"]},
-        "providedModelName": "claude-3-opus",
+        "metadata": {"provider": malformed_provider},
+        "providedModelName": model_name,
     }
-    assert infer_provider(observation) == "anthropic"
-
-
-def test_infer_provider_ignores_malformed_explicit_provider_dict():
-    observation = {
-        "metadata": {"provider": {"name": "openai"}},
-        "providedModelName": "gemini-pro",
-    }
-    assert infer_provider(observation) == "google"
+    assert infer_provider(observation) == expected_provider
 
 
 def test_infer_provider_malformed_explicit_provider_and_no_model_match_returns_unknown():
@@ -537,6 +534,46 @@ def test_infer_provider_ignores_whitespace_only_explicit_provider():
 def test_infer_provider_strips_whitespace_from_explicit_provider():
     observation = {
         "metadata": {"provider": "  openai  "},
+        "providedModelName": "claude-3-opus",
+    }
+    assert infer_provider(observation) == "openai"
+
+
+def test_infer_provider_handles_non_string_provided_model_name_int():
+    assert infer_provider({"providedModelName": 12345}) == "unknown"
+
+
+def test_infer_provider_handles_non_string_provided_model_name_list():
+    assert infer_provider({"providedModelName": ["gpt-4o-mini"]}) == "unknown"
+
+
+def test_infer_provider_valid_explicit_provider_short_circuits_before_model_name_check():
+    observation = {
+        "metadata": {"provider": "openai"},
+        "providedModelName": {"unexpected": "shape"},
+    }
+    assert infer_provider(observation) == "openai"
+
+
+def test_infer_provider_normalizes_explicit_provider_case():
+    observation = {
+        "metadata": {"provider": "OpenAI"},
+        "providedModelName": "claude-3-opus",
+    }
+    assert infer_provider(observation) == "openai"
+
+
+def test_infer_provider_normalizes_custom_explicit_provider_case():
+    observation = {
+        "metadata": {"provider": "Custom-Provider"},
+        "providedModelName": "gpt-4o-mini",
+    }
+    assert infer_provider(observation) == "custom-provider"
+
+
+def test_infer_provider_normalizes_explicit_provider_whitespace_and_case():
+    observation = {
+        "metadata": {"provider": "  OpenAI  "},
         "providedModelName": "claude-3-opus",
     }
     assert infer_provider(observation) == "openai"
