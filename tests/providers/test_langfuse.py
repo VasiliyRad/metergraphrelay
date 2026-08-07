@@ -1,6 +1,10 @@
 import json
 
-from metergraphrelay.providers.langfuse import build_base_params, build_filter
+from metergraphrelay.providers.langfuse import (
+    RESPONSE_FIELDS,
+    build_base_params,
+    build_filter,
+)
 
 
 def test_build_filter_returns_none_when_no_selectors():
@@ -76,13 +80,13 @@ def test_build_base_params_includes_since_and_environment():
     assert params["environment"] == "production"
 
 
-def test_build_base_params_includes_filter_when_selectors_given():
+def test_build_base_params_filter_includes_selector_and_safety_conditions():
     params = build_base_params(
         until="2026-08-07T00:00:00+00:00",
-        since=None,
+        since="2026-08-01T00:00:00+00:00",
         trace_names=["support-bot"],
         tags=["prod"],
-        environment=None,
+        environment="production",
     )
     assert json.loads(params["filter"]) == [
         {
@@ -97,4 +101,96 @@ def test_build_base_params_includes_filter_when_selectors_given():
             "operator": "all of",
             "value": ["prod"],
         },
+        {
+            "type": "stringOptions",
+            "column": "type",
+            "operator": "any of",
+            "value": ["GENERATION"],
+        },
+        {
+            "type": "datetime",
+            "column": "startTime",
+            "operator": ">=",
+            "value": "2026-08-01T00:00:00+00:00",
+        },
+        {
+            "type": "datetime",
+            "column": "startTime",
+            "operator": "<",
+            "value": "2026-08-07T00:00:00+00:00",
+        },
+        {
+            "type": "stringOptions",
+            "column": "environment",
+            "operator": "any of",
+            "value": ["production"],
+        },
     ]
+
+
+def test_build_base_params_filter_omits_optional_safety_conditions_when_absent():
+    params = build_base_params(
+        until="2026-08-07T00:00:00+00:00",
+        since=None,
+        trace_names=["support-bot"],
+        tags=[],
+        environment=None,
+    )
+    assert json.loads(params["filter"]) == [
+        {
+            "type": "stringOptions",
+            "column": "traceName",
+            "operator": "any of",
+            "value": ["support-bot"],
+        },
+        {
+            "type": "stringOptions",
+            "column": "type",
+            "operator": "any of",
+            "value": ["GENERATION"],
+        },
+        {
+            "type": "datetime",
+            "column": "startTime",
+            "operator": "<",
+            "value": "2026-08-07T00:00:00+00:00",
+        },
+    ]
+
+
+def test_build_base_params_omits_individual_params_when_filter_present():
+    params = build_base_params(
+        until="2026-08-07T00:00:00+00:00",
+        since="2026-08-01T00:00:00+00:00",
+        trace_names=["support-bot"],
+        tags=[],
+        environment="production",
+    )
+    assert "type" not in params
+    assert "toStartTime" not in params
+    assert "fromStartTime" not in params
+    assert "environment" not in params
+    assert "filter" in params
+
+
+def test_build_base_params_requests_metadata_field_group():
+    params = build_base_params(
+        until="2026-08-07T00:00:00+00:00",
+        since=None,
+        trace_names=[],
+        tags=[],
+        environment=None,
+    )
+    assert "metadata" in RESPONSE_FIELDS.split(",")
+    assert params["fields"] == RESPONSE_FIELDS
+
+
+def test_build_base_params_never_sends_deprecated_parse_io_as_json():
+    params = build_base_params(
+        until="2026-08-07T00:00:00+00:00",
+        since=None,
+        trace_names=[],
+        tags=[],
+        environment=None,
+    )
+    assert "parseIoAsJson" not in params
