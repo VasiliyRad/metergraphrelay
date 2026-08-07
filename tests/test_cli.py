@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -644,3 +645,45 @@ def test_pull_help_lists_langfuse_subcommand(capsys):
         build_parser().parse_args(["pull", "--help"])
 
     assert "langfuse" in capsys.readouterr().out
+
+
+def test_readme_pull_langfuse_examples_parse_successfully():
+    readme_text = (Path(__file__).parent.parent / "README.md").read_text()
+
+    assert "metergraphrelay pull langfuse -n 25 --output traces.jsonl" in readme_text
+    assert (
+        "metergraphrelay pull langfuse --since 2026-08-01T00:00:00Z "
+        "--until 2026-08-07T00:00:00Z"
+    ) in readme_text
+    assert (
+        "metergraphrelay pull langfuse --trace-name support-bot-reply "
+        "--trace-name billing-bot-reply --tag prod --tag tier-1"
+    ) in readme_text
+
+    build_parser().parse_args(
+        ["pull", "langfuse", "-n", "25", "--output", "traces.jsonl"]
+    )
+    build_parser().parse_args(
+        [
+            "pull",
+            "langfuse",
+            "--since",
+            "2026-08-01T00:00:00Z",
+            "--until",
+            "2026-08-07T00:00:00Z",
+        ]
+    )
+    build_parser().parse_args(
+        [
+            "pull",
+            "langfuse",
+            "--trace-name",
+            "support-bot-reply",
+            "--trace-name",
+            "billing-bot-reply",
+            "--tag",
+            "prod",
+            "--tag",
+            "tier-1",
+        ]
+    )

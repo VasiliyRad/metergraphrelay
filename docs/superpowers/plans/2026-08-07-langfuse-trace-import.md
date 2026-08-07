@@ -58,7 +58,7 @@ Note the confirmed param names are `fromStartTime`/`toStartTime` and `limit`/`cu
 
 **Remaining verification gap, carried into Task 1's Step 1 as an explicit live-check:** the exact `column` name for trace name (`"traceName"`) and tags (`"tags"`) on the **observations** filter specifically — as opposed to the **traces** filter, which definitely supports them — is corroborated by the `ObservationV2` field list (which explicitly lists `traceName`/`tags` as available, denormalized-from-trace fields) but no single source quotes a byte-for-byte `filter` example using `column: "traceName"` against `/v2/observations`. Task 1 implements this as the primary hypothesis (it is the best-evidenced reading of multiple independent, current, official sources) and includes a concrete live-check step before the task is considered done.
 
-**Langfuse Cloud default base URL:** `https://cloud.langfuse.com` (EU region default; confirmed live). The approved design spec's env var name is `LANGFUSE_HOST` — this plan uses that name as specified, even though Langfuse's newer SDKs now prefer `LANGFUSE_BASE_URL` as an alias; changing the credential env var name is a spec-level decision outside this plan's scope.
+**Langfuse Cloud default base URL:** `https://cloud.langfuse.com` (EU region default; confirmed live). The env var name is `LANGFUSE_BASE_URL`, Langfuse's current official default. **Corrected post-implementation:** this section originally named the env var `LANGFUSE_HOST`, reasoning at the time that changing it was "a spec-level decision outside this plan's scope" — that decision has since been made and implemented; every `LANGFUSE_HOST` reference throughout this plan has been updated to `LANGFUSE_BASE_URL` to match the committed code, with no `LANGFUSE_HOST` fallback retained.
 
 ---
 
@@ -68,9 +68,9 @@ Note the confirmed param names are `fromStartTime`/`toStartTime` and `limit`/`cu
 - **Create:** `tests/providers/test_langfuse.py` — unit tests for every function above.
 - **Modify:** `src/metergraphrelay/cli.py` — add langfuse flags to `pull_langfuse_parser`, add `--help` text, add `_resolve_langfuse_credentials`/`_run_pull_langfuse` helpers, replace the current `langfuse`-goes-through-`_not_implemented` stub branch with a real dispatch branch.
 - **Modify:** `tests/test_cli.py` — replace the now-obsolete "reports not implemented" langfuse test, add dispatch/credential/base-url/help/doc-consistency tests.
-- **Modify:** `tests/conftest.py:8-10` — add `LANGFUSE_HOST` to the autouse-cleared env var set (a new env var this feature reads directly, outside `CREDENTIAL_SPECS`).
+- **Modify:** `tests/conftest.py:8-10` — add `LANGFUSE_BASE_URL` to the autouse-cleared env var set (a new env var this feature reads directly, outside `CREDENTIAL_SPECS`).
 - **Modify:** `README.md` — add a "Pull from Langfuse" section (quickstart, credential/host config, selector examples, v4+/generation-only/privacy statements).
-- **Modify:** `.env.example` — add a commented, optional `LANGFUSE_HOST` line.
+- **Modify:** `.env.example` — add a commented, optional `LANGFUSE_BASE_URL` line.
 - **Not modified:** `src/metergraphrelay/config.py` (already correct), `src/metergraphrelay/push.py` (already provider-agnostic), `src/metergraphrelay/demo.py`, `pyproject.toml` (version bump is a separate follow-up chore commit per this repo's existing convention — see git log — not part of this feature's implementation).
 
 ---
@@ -1226,7 +1226,7 @@ git commit -m "feat(langfuse): add cursor pagination, count cap, and atomic outp
 - Consumes: `pull_langfuse`, `LangfuseAPIError`, `DEFAULT_LANGFUSE_HOST` from `metergraphrelay.providers.langfuse` (Tasks 1, 2, 6).
 - Produces: `_resolve_langfuse_credentials(args: argparse.Namespace) -> tuple[str, str]`; `_run_pull_langfuse(args: argparse.Namespace) -> int` in `cli.py`.
 
-- [ ] **Step 1: Add `LANGFUSE_HOST` to the cleared-env-vars fixture**
+- [ ] **Step 1: Add `LANGFUSE_BASE_URL` to the cleared-env-vars fixture**
 
 `tests/conftest.py:8-10` currently reads:
 
@@ -1242,11 +1242,11 @@ Change to:
 ```python
 ENV_VARS_READ_BY_CLI = sorted(
     {name for names in CREDENTIAL_SPECS.values() for name in names}
-    | {"METERGRAPH_INGEST_URL", "LANGFUSE_HOST"}
+    | {"METERGRAPH_INGEST_URL", "LANGFUSE_BASE_URL"}
 )
 ```
 
-This is required before any new CLI test below can be trusted — `LANGFUSE_HOST` is read directly via `os.environ.get`, outside `CREDENTIAL_SPECS`, so without this change a leftover value from one test's `.env` file could leak into the next test via `load_dotenv(..., override=True)`.
+This is required before any new CLI test below can be trusted — `LANGFUSE_BASE_URL` is read directly via `os.environ.get`, outside `CREDENTIAL_SPECS`, so without this change a leftover value from one test's `.env` file could leak into the next test via `load_dotenv(..., override=True)`.
 
 - [ ] **Step 2: Write the failing test replacing the obsolete "not implemented" langfuse test**
 
@@ -1431,7 +1431,7 @@ def _run_pull_langfuse(args: argparse.Namespace) -> int:
         public_key, secret_key = _resolve_langfuse_credentials(args)
     except ConfigError as exc:
         return _config_error(exc)
-    base_url = args.base_url or os.environ.get("LANGFUSE_HOST") or DEFAULT_LANGFUSE_HOST
+    base_url = args.base_url or os.environ.get("LANGFUSE_BASE_URL") or DEFAULT_LANGFUSE_HOST
     until = args.until or datetime.now(timezone.utc).isoformat()
     try:
         imported, skipped = pull_langfuse(
@@ -1494,7 +1494,7 @@ def test_main_pull_langfuse_base_url_flag_takes_precedence_over_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n"
-        "LANGFUSE_HOST=https://env-host.example.com\n"
+        "LANGFUSE_BASE_URL=https://env-host.example.com\n"
     )
 
     with patch(
@@ -1520,7 +1520,7 @@ def test_main_pull_langfuse_base_url_falls_back_to_langfuse_host_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n"
-        "LANGFUSE_HOST=https://env-host.example.com\n"
+        "LANGFUSE_BASE_URL=https://env-host.example.com\n"
     )
 
     with patch(
@@ -1731,7 +1731,7 @@ def test_pull_langfuse_help_documents_every_flag_and_default(capsys):
         "--route",
         "Not a selector",
         "--base-url",
-        "LANGFUSE_HOST",
+        "LANGFUSE_BASE_URL",
         "--output",
         "./traces.jsonl",
         "--env-file",
@@ -1852,7 +1852,7 @@ In `src/metergraphrelay/cli.py`, replace the `pull_langfuse_parser` block added 
     pull_langfuse_parser.add_argument(
         "--base-url",
         default=None,
-        help="Langfuse API base URL. (default: $LANGFUSE_HOST if set, else Langfuse Cloud)",
+        help="Langfuse API base URL. (default: $LANGFUSE_BASE_URL if set, else Langfuse Cloud)",
     )
     pull_langfuse_parser.add_argument(
         "--output",
@@ -1933,9 +1933,9 @@ v2 Observations API); older self-hosted deployments are not supported.
     LANGFUSE_SECRET_KEY=sk-lf-...
 
 By default this talks to Langfuse Cloud. For a self-hosted instance,
-set `LANGFUSE_HOST` in `.env` (or pass `--base-url` per-command):
+set `LANGFUSE_BASE_URL` in `.env` (or pass `--base-url` per-command):
 
-    LANGFUSE_HOST=https://your-langfuse-instance.example.com
+    LANGFUSE_BASE_URL=https://your-langfuse-instance.example.com
 
 **Quickstart:**
 
@@ -1996,7 +1996,7 @@ OPENAI_API_KEY=sk-your-key-here
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 LANGFUSE_PUBLIC_KEY=pk-lf-your-key-here
 LANGFUSE_SECRET_KEY=sk-lf-your-key-here
-# LANGFUSE_HOST=https://cloud.langfuse.com   # optional; only needed for self-hosted Langfuse
+# LANGFUSE_BASE_URL=https://cloud.langfuse.com   # optional; only needed for self-hosted Langfuse
 METERGRAPH_APP_TOKEN=your-metergraph-token-here
 ```
 
@@ -2069,7 +2069,7 @@ Expected: all tests pass.
 
 ```bash
 git add README.md .env.example tests/test_cli.py
-git commit -m "docs: add Langfuse pull section to README and LANGFUSE_HOST to .env.example"
+git commit -m "docs: add Langfuse pull section to README and LANGFUSE_BASE_URL to .env.example"
 ```
 
 ---
@@ -2117,6 +2117,6 @@ Cross-check against `docs/superpowers/specs/2026-08-07-langfuse-trace-import-des
 - Tests exist per the Testing section, including documentation-specific and targeting-specific items — done (Tasks 1–9).
 - README has the required `pull langfuse` section — done (Task 9).
 - `--help` text is complete — done (Task 8).
-- `.env.example` addresses `LANGFUSE_HOST` — done (Task 9).
+- `.env.example` addresses `LANGFUSE_BASE_URL` — done (Task 9).
 
 No further action needed for this plan; version bump and any PyPI republish are separate follow-up chores outside this plan's scope, per this repo's existing convention of committing version bumps separately from feature work.

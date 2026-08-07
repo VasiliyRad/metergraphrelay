@@ -48,7 +48,9 @@ changes needed there:
 |---|---|
 | `LANGFUSE_PUBLIC_KEY` | HTTP Basic Auth username |
 | `LANGFUSE_SECRET_KEY` | HTTP Basic Auth password |
-| `LANGFUSE_HOST` | base URL; defaults to Langfuse Cloud (`https://cloud.langfuse.com`) when unset |
+| `LANGFUSE_BASE_URL` | base URL; defaults to Langfuse Cloud (`https://cloud.langfuse.com`) when unset |
+
+**Corrected post-implementation:** this table originally named the env var `LANGFUSE_HOST`. That was a deliberate but, in hindsight, unverified choice — Langfuse's current official default is `LANGFUSE_BASE_URL`, with no documented `LANGFUSE_HOST` compatibility requirement. Every `LANGFUSE_HOST` reference throughout this spec has been updated to `LANGFUSE_BASE_URL` to match the committed implementation; no `LANGFUSE_HOST` fallback was kept.
 
 - Auth is HTTP Basic, `LANGFUSE_PUBLIC_KEY` as username,
   `LANGFUSE_SECRET_KEY` as password — verified against Langfuse's public
@@ -129,7 +131,7 @@ metergraphrelay pull langfuse [-n/--count 100] [--since ISO8601] [--until ISO860
 | `--tag` | none — repeatable, no filter if omitted | matches against Langfuse trace tags; may be passed multiple times — **AND semantics** (all listed tags must be present on the trace). Combines with every other selector via AND. See "Targeting & filtering" below. |
 | `--environment` | none | passed through to Langfuse's `environment` filter, if set; combines with all other selectors via AND |
 | `--route` | none — falls back to trace/generation name (see Mapping) | same semantics as `pull openai --route`: caller-supplied override of the **output** row's `route` field. Distinct from `--trace-name`, which selects **which** generations get pulled in the first place — see "Targeting & filtering" below for why these are two different flags despite both concerning trace names. |
-| `--base-url` | none — falls back to `LANGFUSE_HOST` env, then Langfuse Cloud | CLI override path for self-hosted instances, per the "flags are the escape hatch" rule above |
+| `--base-url` | none — falls back to `LANGFUSE_BASE_URL` env, then Langfuse Cloud | CLI override path for self-hosted instances, per the "flags are the escape hatch" rule above |
 | `--output` | `./traces.jsonl` | matches `pull openai`'s default |
 | `--env-file` | `.env` | matches every existing subcommand |
 | `--langfuse-public-key` / `--langfuse-secret-key` | none | CLI override path for credentials; env is preferred |
@@ -257,7 +259,7 @@ example-driven style already used there. It must cover, explicitly:
   `OPENAI_API_KEY`/`METERGRAPH_APP_TOKEN` — this needs to grow to
   include the Langfuse pair, or clearly point to `.env.example`, which
   already lists both).
-- **Cloud vs self-hosted host configuration**: `LANGFUSE_HOST` unset →
+- **Cloud vs self-hosted host configuration**: `LANGFUSE_BASE_URL` unset →
   Langfuse Cloud; set (or `--base-url` passed) → that self-hosted
   instance. State the default explicitly rather than leaving it
   implicit, since this is the one piece of config that differs in kind
@@ -360,7 +362,7 @@ options:
                         trace has none) Not a selector — see
                         --trace-name for filtering which generations
                         are pulled.
-  --base-url BASE_URL   Langfuse API base URL. (default: $LANGFUSE_HOST
+  --base-url BASE_URL   Langfuse API base URL. (default: $LANGFUSE_BASE_URL
                         if set, else Langfuse Cloud)
   --output OUTPUT       Path to write the resulting JSONL file.
                         (default: ./traces.jsonl)
@@ -515,9 +517,9 @@ rather than hitting a real API. Coverage to include:
 
 - **Auth**: outgoing request carries correct HTTP Basic `Authorization`
   header built from `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`.
-- **Base URL selection**: Langfuse Cloud default when `LANGFUSE_HOST`/
+- **Base URL selection**: Langfuse Cloud default when `LANGFUSE_BASE_URL`/
   `--base-url` unset; override respected when either is set; `--base-url`
-  takes precedence over `LANGFUSE_HOST` per the "flags are the escape
+  takes precedence over `LANGFUSE_BASE_URL` per the "flags are the escape
   hatch" rule.
 - **Pagination**: multi-page response sequences are followed correctly;
   stops at `count`; stops at window exhaustion when `count` isn't hit.
@@ -670,7 +672,7 @@ down via docs/spec alone.
   from environment/`.env` only, sent solely as the Basic Auth header to
   the configured Langfuse host, never logged, never written to the
   output JSONL or any other file.
-- Basic Auth over a non-HTTPS `--base-url`/`LANGFUSE_HOST` (a
+- Basic Auth over a non-HTTPS `--base-url`/`LANGFUSE_BASE_URL` (a
   self-hosted instance reachable only over plain `http://`) would send
   both the secret key and all pulled content in plaintext on that leg —
   the same caveat already documented in `SECURITY.md` for metergraph's
@@ -728,7 +730,7 @@ following hold:
       env-var relationship, stated in the help text itself.
 - [ ] `.env.example` already lists `LANGFUSE_PUBLIC_KEY`/
       `LANGFUSE_SECRET_KEY` (verified pre-existing); confirm at
-      implementation time whether `LANGFUSE_HOST` should be added there
+      implementation time whether `LANGFUSE_BASE_URL` should be added there
       too, since it's a new env var this feature introduces that
       `.env.example` doesn't yet mention.
 

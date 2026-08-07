@@ -72,9 +72,9 @@ Before enabling this in production:
 `OPENAI_API_KEY` and `METERGRAPH_APP_TOKEN` upfront so it fails fast
 instead of pulling data it can't push.
 
-`pull anthropic` / `pull langfuse` accept the same shape but aren't
-implemented yet — they check for `ANTHROPIC_API_KEY` /
-`LANGFUSE_PUBLIC_KEY`+`LANGFUSE_SECRET_KEY` and report accordingly.
+`pull anthropic` accepts the same shape but isn't implemented yet — it
+checks for `ANTHROPIC_API_KEY` and reports accordingly. `pull langfuse`
+is implemented — see [Pull from Langfuse](#pull-from-langfuse) below.
 
 All subcommands accept `--env-file PATH`.
 
@@ -110,6 +110,64 @@ Every completion returned by the stored-completions list already succeeded,
 so `status` is always `"success"`. `error`/`error_type` flag a *partial*
 record: `--include-content` was requested but the follow-up message fetch
 failed, so token counts are still real while the content is missing.
+
+## Pull from Langfuse
+
+Import Langfuse **GENERATION** observations (the LLM call records
+Langfuse captures) into the same metergraph-native JSONL shape as
+`pull openai`. Only `GENERATION` observations are imported — Langfuse
+`SPAN`/`EVENT` observations and Scores/evals are never imported.
+Requires Langfuse Cloud or **self-hosted v4+** (the version serving the
+v2 Observations API); older self-hosted deployments are not supported.
+
+**Setup:** add your Langfuse keys to `.env`:
+
+    LANGFUSE_PUBLIC_KEY=pk-lf-...
+    LANGFUSE_SECRET_KEY=sk-lf-...
+
+By default this talks to Langfuse Cloud. For a self-hosted instance,
+set `LANGFUSE_BASE_URL` in `.env` (or pass `--base-url` per-command):
+
+    LANGFUSE_BASE_URL=https://your-langfuse-instance.example.com
+
+**Quickstart:**
+
+    metergraphrelay pull langfuse -n 25 --output traces.jsonl
+    metergraphrelay push traces.jsonl
+
+With no other flags, this imports the latest 100 `GENERATION`
+observations overall (not 100 distinct traces).
+
+**Narrowing what gets pulled**, beyond `-n`/`--count`:
+
+    metergraphrelay pull langfuse --since 2026-08-01T00:00:00Z --until 2026-08-07T00:00:00Z
+    metergraphrelay pull langfuse --trace-name support-bot-reply --trace-name billing-bot-reply --tag prod --tag tier-1
+
+- `--trace-name` matches Langfuse's trace name — the closest Langfuse
+  concept to a workflow or use case (e.g. `"support-bot-reply"`). It's
+  repeatable; multiple `--trace-name` values are **OR'd** together (any
+  match).
+- `--tag` matches Langfuse trace tags — commonly used as customer-defined
+  categories (a tenant, an experiment cohort, a priority tier); this is
+  a convention, not something Langfuse enforces. It's repeatable;
+  multiple `--tag` values require **all** of them to be present (AND).
+  `--tag` only matches tags that already exist on your historical
+  data — it can't require a tag that was never set, and if you don't
+  pass `--tag` at all, there's no tag-based narrowing (not "untagged
+  only").
+- `--trace-name`, `--tag`, `--environment`, and `--since`/`--until` all
+  combine with each other using AND.
+- `--count` is always a cap on the number of **GENERATION observations**
+  imported, never a count of distinct traces.
+
+**Before running this against your own data:** `pull langfuse`
+transfers every matched generation's prompt/response content from
+Langfuse into your local JSONL file, and from there into metergraph via
+`push`, with no separate opt-in step — unlike `pull openai`'s
+`--include-content` flag, there is no way to pull Langfuse generations
+without their content.
+
+Full flag reference: `metergraphrelay pull langfuse --help`.
 
 ## Development
 
