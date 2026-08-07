@@ -9,6 +9,8 @@ import pytest
 from metergraphrelay.providers.langfuse import (
     LangfuseAPIError,
     RESPONSE_FIELDS,
+    _map_content,
+    _response_text,
     build_base_params,
     build_filter,
     fetch_observations_page,
@@ -577,3 +579,38 @@ def test_infer_provider_normalizes_explicit_provider_whitespace_and_case():
         "providedModelName": "claude-3-opus",
     }
     assert infer_provider(observation) == "openai"
+
+
+def test_map_content_chat_message_list_becomes_request_json():
+    result = _map_content([{"role": "user", "content": "hi"}])
+    assert result == (json.dumps([{"role": "user", "content": "hi"}]), None)
+
+
+def test_map_content_string_becomes_request_text():
+    assert _map_content("plain prompt text") == (None, "plain prompt text")
+
+
+def test_map_content_none_stays_none():
+    assert _map_content(None) == (None, None)
+
+
+def test_map_content_arbitrary_dict_becomes_request_text_as_json():
+    result = _map_content({"foo": "bar"})
+    assert result == (None, json.dumps({"foo": "bar"}))
+
+
+def test_map_content_non_message_list_becomes_request_text_as_json():
+    result = _map_content([1, 2, 3])
+    assert result == (None, json.dumps([1, 2, 3]))
+
+
+def test_response_text_passes_through_string():
+    assert _response_text("the reply") == "the reply"
+
+
+def test_response_text_serializes_non_string():
+    assert _response_text({"foo": "bar"}) == json.dumps({"foo": "bar"})
+
+
+def test_response_text_none_stays_none():
+    assert _response_text(None) is None

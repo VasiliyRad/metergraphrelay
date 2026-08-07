@@ -193,3 +193,28 @@ def infer_provider(observation: dict[str, Any]) -> str:
         if model_name.startswith(prefix):
             return provider
     return "unknown"
+
+
+def _is_chat_message_list(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(
+        isinstance(item, dict) and "role" in item and "content" in item
+        for item in value
+    )
+
+
+def _map_content(input_value: Any) -> tuple[str | None, str | None]:
+    if input_value is None:
+        return None, None
+    if _is_chat_message_list(input_value):
+        return json.dumps(input_value), None
+    if isinstance(input_value, str):
+        return None, input_value
+    return None, json.dumps(input_value)
+
+
+def _response_text(output_value: Any) -> str | None:
+    if output_value is None:
+        return None
+    if isinstance(output_value, str):
+        return output_value
+    return json.dumps(output_value)
