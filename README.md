@@ -66,6 +66,7 @@ Before enabling this in production:
     metergraphrelay demo openai --model gpt-4o-mini
     metergraphrelay push traces.jsonl
     metergraphrelay sync openai -n 25 --output my-traces.jsonl --route my-app/support-bot
+    metergraphrelay sync portkey export.jsonl --output converted.jsonl
 
 `sync openai` accepts the same flags as `pull openai`. It pulls to
 `--output` and immediately pushes that same file, checking both
@@ -75,6 +76,8 @@ instead of pulling data it can't push.
 `pull anthropic` accepts the same shape but isn't implemented yet — it
 checks for `ANTHROPIC_API_KEY` and reports accordingly. `pull langfuse`
 is implemented — see [Pull from Langfuse](#pull-from-langfuse) below.
+`sync portkey` converts a local Portkey export instead of pulling from
+an API — see [Sync from Portkey](#sync-from-portkey) below.
 
 All subcommands accept `--env-file PATH`.
 
@@ -168,6 +171,36 @@ Langfuse into your local JSONL file, and from there into metergraph via
 without their content.
 
 Full flag reference: `metergraphrelay pull langfuse --help`.
+
+## Sync from Portkey
+
+Convert a Portkey JSONL log export you've already downloaded into
+metergraph-native JSONL and upload it in one step. This command never
+contacts Portkey — it only reads a local file.
+
+Requires a Portkey subscription with log export enabled. Download the
+export from Portkey yourself first; `metergraphrelay` doesn't fetch it
+for you and never sees your Portkey account.
+
+**Quickstart:**
+
+    metergraphrelay sync portkey export.jsonl
+
+Only `METERGRAPH_APP_TOKEN` is needed — there's no Portkey credential to
+configure.
+
+To keep the converted metergraph-native file instead of a private
+temporary one that's deleted after upload:
+
+    metergraphrelay sync portkey export.jsonl --output converted.jsonl
+
+`--output` is retained even if the upload fails, so you can retry with
+`metergraphrelay push converted.jsonl`.
+
+**Before running this against your own export:** request and response
+content from the export is uploaded to MeterGraph, with no opt-out.
+
+Full flag reference: `metergraphrelay sync portkey --help`.
 
 ## Development
 
