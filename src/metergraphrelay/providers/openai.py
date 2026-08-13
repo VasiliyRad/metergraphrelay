@@ -7,6 +7,7 @@ from itertools import islice
 from typing import Any, Iterable
 
 from .. import __version__
+from ..contract import with_import_provenance
 
 
 def normalize_completion(
@@ -16,6 +17,7 @@ def normalize_completion(
     route: str,
     include_content: bool,
     content_fetch_error: Exception | None = None,
+    source_scope: str = "default",
 ) -> dict:
     usage = getattr(completion, "usage", None)
     tags = getattr(completion, "metadata", None) or {}
@@ -35,7 +37,7 @@ def normalize_completion(
         if choices:
             response_text = getattr(choices[0].message, "content", None)
 
-    return {
+    row = {
         "ts": ts,
         "provider": "openai",
         "model": completion.model,
@@ -56,6 +58,13 @@ def normalize_completion(
         "sdk": "metergraphrelay",
         "sdk_version": __version__,
     }
+    return with_import_provenance(
+        row,
+        source="openai",
+        scope=source_scope,
+        event_id=completion.id,
+        source_trace_id=completion.id,
+    )
 
 
 def pull_openai(
@@ -66,6 +75,7 @@ def pull_openai(
     route: str,
     include_content: bool,
     echo_stdout: bool = False,
+    source_scope: str = "default",
 ) -> int:
     page = client.chat.completions.list(order="desc", limit=count)
     completions = list(islice(iter(page), count))
@@ -74,7 +84,11 @@ def pull_openai(
         for completion in completions:
             if not include_content:
                 row = normalize_completion(
-                    completion, [], route=route, include_content=include_content
+                    completion,
+                    [],
+                    route=route,
+                    include_content=include_content,
+                    source_scope=source_scope,
                 )
             else:
                 try:
@@ -85,13 +99,20 @@ def pull_openai(
                         file=sys.stderr,
                     )
                     row = normalize_completion(
-                        completion, [], route=route, include_content=include_content,
+                        completion,
+                        [],
+                        route=route,
+                        include_content=include_content,
                         content_fetch_error=exc,
+                        source_scope=source_scope,
                     )
                 else:
                     row = normalize_completion(
-                        completion, messages, route=route,
+                        completion,
+                        messages,
+                        route=route,
                         include_content=include_content,
+                        source_scope=source_scope,
                     )
             line = json.dumps(row)
             f.write(line + "\n")

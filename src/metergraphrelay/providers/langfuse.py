@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any
 
 from .. import __version__
+from ..contract import with_import_provenance
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 OBSERVATIONS_PATH = "/api/public/v2/observations"
@@ -27,7 +28,9 @@ GENERATION_TYPE = "GENERATION"
 RESPONSE_FIELDS = "core,basic,time,io,usage,model,metadata,trace_context"
 
 
-def _selector_conditions(trace_names: list[str], tags: list[str]) -> list[dict[str, Any]]:
+def _selector_conditions(
+    trace_names: list[str], tags: list[str]
+) -> list[dict[str, Any]]:
     conditions: list[dict[str, Any]] = []
     if trace_names:
         conditions.append(
@@ -213,9 +216,13 @@ def infer_provider(observation: dict[str, Any]) -> str:
 
 
 def _is_chat_message_list(value: Any) -> bool:
-    return isinstance(value, list) and bool(value) and all(
-        isinstance(item, dict) and "role" in item and "content" in item
-        for item in value
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(item, dict) and "role" in item and "content" in item
+            for item in value
+        )
     )
 
 
@@ -253,7 +260,10 @@ def _response_text(output_value: Any) -> str | None:
 
 
 def normalize_observation(
-    observation: dict[str, Any], *, route_override: str | None
+    observation: dict[str, Any],
+    *,
+    route_override: str | None,
+    source_scope: str = "default",
 ) -> dict:
     trace_name = observation.get("traceName") or None
     own_name = observation.get("name") or None
@@ -286,7 +296,7 @@ def normalize_observation(
 
     model = _resolve_model_name(observation)
 
-    return {
+    row = {
         "ts": observation["startTime"],
         "source": "langfuse",
         "sdk": "metergraphrelay",
@@ -312,6 +322,13 @@ def normalize_observation(
         "session_id": observation.get("sessionId"),
         "environment": observation.get("environment"),
     }
+    return with_import_provenance(
+        row,
+        source="langfuse",
+        scope=source_scope,
+        event_id=observation["id"],
+        source_trace_id=observation["traceId"],
+    )
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:
@@ -334,6 +351,7 @@ def pull_langfuse(
     environment: str | None,
     route: str | None,
     output_path: str,
+    source_scope: str = "default",
 ) -> tuple[int, int]:
     base_params = build_base_params(
         until=until,
@@ -378,7 +396,11 @@ def pull_langfuse(
                     if imported >= count:
                         break
                     try:
-                        row = normalize_observation(observation, route_override=route)
+                        row = normalize_observation(
+                            observation,
+                            route_override=route,
+                            source_scope=source_scope,
+                        )
                         line = json.dumps(row)
                     except (KeyError, TypeError, AttributeError) as exc:
                         skipped += 1

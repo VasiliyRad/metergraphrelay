@@ -5,6 +5,7 @@ import sys
 from typing import Any
 
 from .. import __version__
+from ..contract import with_import_provenance
 
 
 def _tool_call_name(call: Any) -> str | None:
@@ -76,7 +77,7 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
     return json.dumps(response), None
 
 
-def normalize_portkey_row(row: dict) -> dict:
+def normalize_portkey_row(row: dict, *, source_scope: str = "default") -> dict:
     ts = row["created_at"]
     request_id = row["id"]
     trace_id = row["trace_id"]
@@ -109,7 +110,7 @@ def normalize_portkey_row(row: dict) -> dict:
     cost = row.get("cost")
     cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
 
-    return {
+    normalized = {
         "ts": ts,
         "provider": row.get("ai_org"),
         "model": row.get("ai_model"),
@@ -133,9 +134,18 @@ def normalize_portkey_row(row: dict) -> dict:
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    return with_import_provenance(
+        normalized,
+        source="portkey",
+        scope=source_scope,
+        event_id=request_id,
+        source_trace_id=trace_id,
+    )
 
 
-def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]:
+def convert_portkey_export(
+    input_path: str, output_path: str, *, source_scope: str = "default"
+) -> tuple[int, int]:
     converted = 0
     skipped = 0
     with open(input_path) as src, open(output_path, "w") as dst:
@@ -153,7 +163,7 @@ def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]
                 )
                 continue
             try:
-                normalized = normalize_portkey_row(row)
+                normalized = normalize_portkey_row(row, source_scope=source_scope)
                 serialized = json.dumps(normalized)
             except (KeyError, TypeError, AttributeError) as exc:
                 skipped += 1

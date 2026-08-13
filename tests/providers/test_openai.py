@@ -31,7 +31,7 @@ def test_normalize_completion_with_content_included():
         completion, messages, route="openai/backfill", include_content=True
     )
 
-    assert row == {
+    expected = {
         "ts": "2026-05-28T20:26:40+00:00",
         "provider": "openai",
         "model": "gpt-4o-mini",
@@ -50,6 +50,12 @@ def test_normalize_completion_with_content_included():
         "sdk": "metergraphrelay",
         "sdk_version": __version__,
     }
+    assert {key: row[key] for key in expected} == expected
+    assert row["import_source"] == "openai"
+    assert row["import_source_scope"] == "default"
+    assert row["import_event_id"] == "chatcmpl-abc123"
+    assert len(row["trace_id"]) == 32
+    assert len(row["span_id"]) == 16
 
 
 def test_normalize_completion_response_text_comes_from_completion_choices():
@@ -147,8 +153,8 @@ def test_pull_openai_writes_jsonl_for_each_completion(tmp_path):
         "chatcmpl-1": [make_message("user", "hi")],
         "chatcmpl-2": [make_message("user", "yo")],
     }
-    client.chat.completions.messages.list.side_effect = (
-        lambda completion_id: messages_by_id[completion_id]
+    client.chat.completions.messages.list.side_effect = lambda completion_id: (
+        messages_by_id[completion_id]
     )
     output_path = tmp_path / "traces.jsonl"
 
@@ -260,9 +266,7 @@ class _FakeAutoPaginatingPage:
 
 def test_pull_openai_does_not_paginate_past_count(tmp_path):
     client = MagicMock()
-    client.chat.completions.list.return_value = _FakeAutoPaginatingPage(
-        total_items=100
-    )
+    client.chat.completions.list.return_value = _FakeAutoPaginatingPage(total_items=100)
     client.chat.completions.messages.list.return_value = []
     output_path = tmp_path / "traces.jsonl"
 

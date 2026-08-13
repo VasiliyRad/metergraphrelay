@@ -24,9 +24,10 @@ def test_main_pull_openai_dispatches_to_pull_openai(tmp_path):
     env_file.write_text("OPENAI_API_KEY=sk-test\n")
     output_path = tmp_path / "out.jsonl"
 
-    with patch("metergraphrelay.cli.OpenAI") as mock_openai_cls, patch(
-        "metergraphrelay.cli.pull_openai", return_value=3
-    ) as mock_pull:
+    with (
+        patch("metergraphrelay.cli.OpenAI") as mock_openai_cls,
+        patch("metergraphrelay.cli.pull_openai", return_value=3) as mock_pull,
+    ):
         exit_code = main(
             [
                 "pull",
@@ -49,6 +50,7 @@ def test_main_pull_openai_dispatches_to_pull_openai(tmp_path):
         route="openai/backfill",
         include_content=True,
         echo_stdout=False,
+        source_scope="default",
     )
 
 
@@ -56,9 +58,10 @@ def test_main_pull_openai_custom_route(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=sk-test\n")
 
-    with patch("metergraphrelay.cli.OpenAI") as mock_openai_cls, patch(
-        "metergraphrelay.cli.pull_openai", return_value=0
-    ) as mock_pull:
+    with (
+        patch("metergraphrelay.cli.OpenAI"),
+        patch("metergraphrelay.cli.pull_openai", return_value=0) as mock_pull,
+    ):
         main(
             [
                 "pull",
@@ -114,9 +117,7 @@ def test_main_pull_langfuse_dispatches_to_pull_langfuse(tmp_path):
     env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
     output_path = tmp_path / "out.jsonl"
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(5, 1)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(5, 1)) as mock_pull:
         exit_code = main(
             [
                 "pull",
@@ -145,6 +146,7 @@ def test_main_pull_langfuse_dispatches_to_pull_langfuse(tmp_path):
         environment=None,
         route=None,
         output_path=str(output_path),
+        source_scope="default",
     )
 
 
@@ -152,9 +154,7 @@ def test_main_pull_langfuse_credential_flags_override_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("")
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -183,9 +183,7 @@ def test_main_pull_langfuse_base_url_from_env_file_resolves_with_cli_credential_
     env_file = tmp_path / ".env"
     env_file.write_text("LANGFUSE_BASE_URL=https://env-file-host.example.com\n")
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -201,9 +199,7 @@ def test_main_pull_langfuse_base_url_from_env_file_resolves_with_cli_credential_
             ]
         )
 
-    assert (
-        mock_pull.call_args.kwargs["base_url"] == "https://env-file-host.example.com"
-    )
+    assert mock_pull.call_args.kwargs["base_url"] == "https://env-file-host.example.com"
 
 
 def test_main_pull_langfuse_base_url_flag_takes_precedence_over_env(tmp_path):
@@ -213,9 +209,7 @@ def test_main_pull_langfuse_base_url_flag_takes_precedence_over_env(tmp_path):
         "LANGFUSE_BASE_URL=https://env-host.example.com\n"
     )
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -239,9 +233,7 @@ def test_main_pull_langfuse_base_url_falls_back_to_langfuse_base_url_env(tmp_pat
         "LANGFUSE_BASE_URL=https://env-host.example.com\n"
     )
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -260,9 +252,7 @@ def test_main_pull_langfuse_base_url_defaults_to_langfuse_cloud(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -281,9 +271,7 @@ def test_main_pull_langfuse_until_defaults_to_command_start_time(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(["pull", "langfuse", "--env-file", str(env_file)])
 
     until_value = mock_pull.call_args.kwargs["until"]
@@ -295,9 +283,7 @@ def test_main_pull_langfuse_repeatable_trace_name_and_tag(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -325,9 +311,7 @@ def test_main_pull_langfuse_default_count_is_100(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-1\nLANGFUSE_SECRET_KEY=sk-1\n")
 
-    with patch(
-        "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
-    ) as mock_pull:
+    with patch("metergraphrelay.cli.pull_langfuse", return_value=(0, 0)) as mock_pull:
         main(
             [
                 "pull",
@@ -395,9 +379,10 @@ def test_main_demo_openai_dispatches_to_run_demo(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=sk-test\n")
 
-    with patch("metergraphrelay.cli.OpenAI") as mock_openai_cls, patch(
-        "metergraphrelay.cli.run_demo"
-    ) as mock_run_demo:
+    with (
+        patch("metergraphrelay.cli.OpenAI") as mock_openai_cls,
+        patch("metergraphrelay.cli.run_demo") as mock_run_demo,
+    ):
         exit_code = main(
             ["demo", "openai", "--env-file", str(env_file), "--model", "gpt-4o-mini"]
         )
@@ -427,9 +412,7 @@ def test_main_push_dispatches_to_push_file(tmp_path):
     trace_file = tmp_path / "traces.jsonl"
     trace_file.write_text("")
 
-    with patch(
-        "metergraphrelay.cli.push_file", return_value=(2, 0)
-    ) as mock_push:
+    with patch("metergraphrelay.cli.push_file", return_value=(2, 0)) as mock_push:
         exit_code = main(["push", str(trace_file), "--env-file", str(env_file)])
 
     assert exit_code == 0
@@ -467,10 +450,13 @@ def test_main_pull_openai_unwritable_output_returns_clean_error(tmp_path, capsys
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=sk-test\n")
 
-    with patch("metergraphrelay.cli.OpenAI"), patch(
-        "metergraphrelay.cli.pull_openai",
-        side_effect=FileNotFoundError(
-            2, "No such file or directory", "/no/such/dir/t.jsonl"
+    with (
+        patch("metergraphrelay.cli.OpenAI"),
+        patch(
+            "metergraphrelay.cli.pull_openai",
+            side_effect=FileNotFoundError(
+                2, "No such file or directory", "/no/such/dir/t.jsonl"
+            ),
         ),
     ):
         exit_code = main(
@@ -494,9 +480,10 @@ def test_main_sync_openai_missing_openai_credential_returns_error(tmp_path, caps
     env_file = tmp_path / ".env"
     env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
 
-    with patch("metergraphrelay.cli.pull_openai") as mock_pull, patch(
-        "metergraphrelay.cli.push_file"
-    ) as mock_push:
+    with (
+        patch("metergraphrelay.cli.pull_openai") as mock_pull,
+        patch("metergraphrelay.cli.push_file") as mock_push,
+    ):
         exit_code = main(["sync", "openai", "--env-file", str(env_file)])
 
     assert exit_code == 1
@@ -510,9 +497,10 @@ def test_main_sync_openai_missing_push_credential_returns_error(tmp_path, capsys
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=sk-test\n")
 
-    with patch("metergraphrelay.cli.pull_openai") as mock_pull, patch(
-        "metergraphrelay.cli.push_file"
-    ) as mock_push:
+    with (
+        patch("metergraphrelay.cli.pull_openai") as mock_pull,
+        patch("metergraphrelay.cli.push_file") as mock_push,
+    ):
         exit_code = main(["sync", "openai", "--env-file", str(env_file)])
 
     assert exit_code == 1
@@ -527,11 +515,11 @@ def test_main_sync_openai_pulls_then_pushes(tmp_path):
     env_file.write_text("OPENAI_API_KEY=sk-test\nMETERGRAPH_APP_TOKEN=tok-123\n")
     output_path = tmp_path / "out.jsonl"
 
-    with patch("metergraphrelay.cli.OpenAI") as mock_openai_cls, patch(
-        "metergraphrelay.cli.pull_openai", return_value=3
-    ) as mock_pull, patch(
-        "metergraphrelay.cli.push_file", return_value=(3, 0)
-    ) as mock_push:
+    with (
+        patch("metergraphrelay.cli.OpenAI") as mock_openai_cls,
+        patch("metergraphrelay.cli.pull_openai", return_value=3) as mock_pull,
+        patch("metergraphrelay.cli.push_file", return_value=(3, 0)) as mock_push,
+    ):
         exit_code = main(
             [
                 "sync",
@@ -553,6 +541,7 @@ def test_main_sync_openai_pulls_then_pushes(tmp_path):
         route="openai/backfill",
         include_content=False,
         echo_stdout=False,
+        source_scope="default",
     )
     mock_push.assert_called_once_with(str(output_path), "tok-123", base_url=None)
 
@@ -561,9 +550,11 @@ def test_main_sync_openai_reports_when_nothing_to_pull_and_skips_push(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=sk-test\nMETERGRAPH_APP_TOKEN=tok-123\n")
 
-    with patch("metergraphrelay.cli.OpenAI"), patch(
-        "metergraphrelay.cli.pull_openai", return_value=0
-    ), patch("metergraphrelay.cli.push_file") as mock_push:
+    with (
+        patch("metergraphrelay.cli.OpenAI"),
+        patch("metergraphrelay.cli.pull_openai", return_value=0),
+        patch("metergraphrelay.cli.push_file") as mock_push,
+    ):
         exit_code = main(["sync", "openai", "--env-file", str(env_file)])
 
     assert exit_code == 0
@@ -574,9 +565,11 @@ def test_main_sync_openai_returns_error_when_push_fails(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=sk-test\nMETERGRAPH_APP_TOKEN=tok-123\n")
 
-    with patch("metergraphrelay.cli.OpenAI"), patch(
-        "metergraphrelay.cli.pull_openai", return_value=2
-    ), patch("metergraphrelay.cli.push_file", return_value=(1, 1)):
+    with (
+        patch("metergraphrelay.cli.OpenAI"),
+        patch("metergraphrelay.cli.pull_openai", return_value=2),
+        patch("metergraphrelay.cli.push_file", return_value=(1, 1)),
+    ):
         exit_code = main(["sync", "openai", "--env-file", str(env_file)])
 
     assert exit_code == 1
@@ -585,15 +578,12 @@ def test_main_sync_openai_returns_error_when_push_fails(tmp_path):
 def test_main_push_uses_custom_ingest_url_from_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "METERGRAPH_APP_TOKEN=tok-123\n"
-        "METERGRAPH_INGEST_URL=http://localhost:8080\n"
+        "METERGRAPH_APP_TOKEN=tok-123\nMETERGRAPH_INGEST_URL=http://localhost:8080\n"
     )
     trace_file = tmp_path / "traces.jsonl"
     trace_file.write_text("")
 
-    with patch(
-        "metergraphrelay.cli.push_file", return_value=(0, 0)
-    ) as mock_push:
+    with patch("metergraphrelay.cli.push_file", return_value=(0, 0)) as mock_push:
         main(["push", str(trace_file), "--env-file", str(env_file)])
 
     mock_push.assert_called_once_with(
@@ -650,7 +640,10 @@ def test_pull_help_lists_langfuse_subcommand(capsys):
 def test_readme_pull_langfuse_examples_parse_successfully():
     readme_text = (Path(__file__).parent.parent / "README.md").read_text()
 
-    assert "metergraphrelay pull langfuse -n 25 --output traces.jsonl" in readme_text
+    assert (
+        "metergraphrelay pull langfuse -n 25 --source-scope "
+        "my-langfuse-project --output traces.jsonl"
+    ) in readme_text
     assert (
         "metergraphrelay pull langfuse --since 2026-08-01T00:00:00Z "
         "--until 2026-08-07T00:00:00Z"

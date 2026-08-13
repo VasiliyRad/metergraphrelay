@@ -106,3 +106,77 @@ def test_push_file_counts_url_error_and_continues(tmp_path, capsys):
     assert failed == 1
     captured = capsys.readouterr()
     assert "connection refused" in captured.err
+
+
+def test_push_file_batches_versioned_import_rows(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    rows = [
+        {
+            "import_source": "openai",
+            "import_source_scope": "project-a",
+            "import_event_id": f"event-{index}",
+            "model": "gpt-test",
+        }
+        for index in range(501)
+    ]
+    file_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        succeeded, failed = push_file(str(file_path), token="tok-123")
+
+    assert (succeeded, failed) == (501, 0)
+    assert mock_urlopen.call_count == 2
+    first = json.loads(mock_urlopen.call_args_list[0].args[0].data)
+    second = json.loads(mock_urlopen.call_args_list[1].args[0].data)
+    assert len(first["rows"]) == 500
+    assert len(second["rows"]) == 1
+    assert first["meta"]["log_import"]["contract_version"] == 1
+    assert first["meta"]["log_import"]["final"] is False
+    assert second["meta"]["log_import"]["final"] is True
+    assert (
+        first["meta"]["log_import"]["run_id"] == second["meta"]["log_import"]["run_id"]
+    )
+
+
+def test_push_file_reuses_import_run_id_for_the_same_file(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    row = {
+        "import_source": "langfuse",
+        "import_source_scope": "https://cloud.langfuse.com:project-a",
+        "import_event_id": "generation-1",
+        "model": "gpt-test",
+    }
+    file_path.write_text(json.dumps(row) + "\n")
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        assert push_file(str(file_path), token="tok-123") == (1, 0)
+        assert push_file(str(file_path), token="tok-123") == (1, 0)
+
+    first = json.loads(mock_urlopen.call_args_list[0].args[0].data)
+    second = json.loads(mock_urlopen.call_args_list[1].args[0].data)
+    assert (
+        first["meta"]["log_import"]["run_id"] == second["meta"]["log_import"]["run_id"]
+    )
+
+
+def test_push_file_scopes_import_run_id_to_the_api_token(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    row = {
+        "import_source": "openai",
+        "import_source_scope": "project-a",
+        "import_event_id": "completion-1",
+    }
+    file_path.write_text(json.dumps(row) + "\n")
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        push_file(str(file_path), token="tenant-token-a")
+        push_file(str(file_path), token="tenant-token-b")
+
+    first = json.loads(mock_urlopen.call_args_list[0].args[0].data)
+    second = json.loads(mock_urlopen.call_args_list[1].args[0].data)
+    assert (
+        first["meta"]["log_import"]["run_id"] != second["meta"]["log_import"]["run_id"]
+    )

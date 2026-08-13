@@ -162,8 +162,13 @@ def test_normalize_portkey_row_maps_verified_fields():
     assert result["error_type"] is None
     assert result["cost_usd"] == 0.125
     assert result["request_id"] == "pk-req-1"
-    assert result["span_id"] == "pk-req-1"
-    assert result["trace_id"] == "trace-1"
+    assert len(result["span_id"]) == 16
+    assert len(result["trace_id"]) == 32
+    assert result["source_span_id"] == "pk-req-1"
+    assert result["source_trace_id"] == "trace-1"
+    assert result["import_source"] == "portkey"
+    assert result["import_source_scope"] == "default"
+    assert result["import_event_id"] == "pk-req-1"
     assert result["route"] == "news-digest"
     assert result["tags"] == row["metadata"]
     assert result["sdk"] == "metergraphrelay"
@@ -195,9 +200,7 @@ def test_normalize_portkey_row_error_status_code_sets_error_fields():
     assert result["tool_calls"] is None
 
 
-@pytest.mark.parametrize(
-    "error_value", [["timeout", "retry-later"], 500, True]
-)
+@pytest.mark.parametrize("error_value", [["timeout", "retry-later"], 500, True])
 def test_normalize_portkey_row_error_type_serializes_non_string_non_dict_error(
     error_value,
 ):
@@ -212,9 +215,7 @@ def test_normalize_portkey_row_error_type_serializes_non_string_non_dict_error(
 
 
 def test_normalize_portkey_row_error_type_stays_none_when_error_key_absent():
-    row = _responses_row(
-        response_status_code=500, response={"provider": "openai"}
-    )
+    row = _responses_row(response_status_code=500, response={"provider": "openai"})
 
     result = normalize_portkey_row(row)
 
@@ -578,9 +579,7 @@ def test_sync_help_lists_portkey_subcommand(capsys):
     assert "portkey" in capsys.readouterr().out
 
 
-def test_main_sync_portkey_returns_clean_error_on_invalid_utf8_export(
-    tmp_path, capsys
-):
+def test_main_sync_portkey_returns_clean_error_on_invalid_utf8_export(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
     export_file = tmp_path / "export.jsonl"
@@ -633,9 +632,7 @@ def test_main_sync_portkey_returns_clean_error_when_output_directory_missing(
     assert "Traceback" not in captured.err
 
 
-def test_main_sync_portkey_zero_converted_summary_reports_all_counts(
-    tmp_path, capsys
-):
+def test_main_sync_portkey_zero_converted_summary_reports_all_counts(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
     export_file = tmp_path / "export.jsonl"

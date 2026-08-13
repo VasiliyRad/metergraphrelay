@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     pull_openai_parser.add_argument("--output", default="./traces.jsonl")
     pull_openai_parser.add_argument("--stdout", action="store_true")
     pull_openai_parser.add_argument("--route", default="openai/backfill")
+    pull_openai_parser.add_argument(
+        "--source-scope",
+        default="default",
+        help="Stable namespace for this OpenAI project (default: default)",
+    )
     pull_openai_parser.add_argument("--include-content", action="store_true")
     pull_openai_parser.add_argument("--env-file", default=".env")
 
@@ -133,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     pull_langfuse_parser.add_argument(
+        "--source-scope",
+        default="default",
+        help="Stable namespace for this Langfuse project (default: default)",
+    )
+    pull_langfuse_parser.add_argument(
         "--base-url",
         default=None,
         help="Langfuse API base URL. (default: $LANGFUSE_BASE_URL if set, else Langfuse Cloud)",
@@ -176,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync_openai_parser.add_argument("--output", default="./traces.jsonl")
     sync_openai_parser.add_argument("--stdout", action="store_true")
     sync_openai_parser.add_argument("--route", default="openai/backfill")
+    sync_openai_parser.add_argument(
+        "--source-scope",
+        default="default",
+        help="Stable namespace for this OpenAI project (default: default)",
+    )
     sync_openai_parser.add_argument("--include-content", action="store_true")
     sync_openai_parser.add_argument("--env-file", default=".env")
 
@@ -201,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
         "export_file",
         metavar="EXPORT_FILE",
         help="Path to a Portkey JSONL log export already downloaded from Portkey.",
+    )
+    sync_portkey_parser.add_argument(
+        "--source-scope",
+        default="default",
+        help="Stable namespace for this Portkey workspace (default: default)",
     )
     sync_portkey_parser.add_argument(
         "--output",
@@ -289,7 +309,9 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
         return _os_error(exc)
 
     try:
-        converted, skipped = convert_portkey_export(args.export_file, tmp_path)
+        converted, skipped = convert_portkey_export(
+            args.export_file, tmp_path, source_scope=args.source_scope
+        )
     except (OSError, UnicodeDecodeError) as exc:
         _cleanup_temp_file(tmp_path)
         return _os_error(exc)
@@ -350,6 +372,7 @@ def _run_pull_langfuse(args: argparse.Namespace) -> int:
             environment=args.environment,
             route=args.route,
             output_path=args.output,
+            source_scope=args.source_scope,
         )
     except (LangfuseAPIError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -386,11 +409,14 @@ def main(argv: list[str] | None = None) -> int:
                 route=args.route,
                 include_content=args.include_content,
                 echo_stdout=args.stdout,
+                source_scope=args.source_scope,
             )
         except OSError as exc:
             return _os_error(exc)
         if written == 0:
-            print("No stored completions found. Try `metergraphrelay demo openai` first.")
+            print(
+                "No stored completions found. Try `metergraphrelay demo openai` first."
+            )
         else:
             print(f"Wrote {written} trace(s) to {args.output}")
         return 0
@@ -410,11 +436,14 @@ def main(argv: list[str] | None = None) -> int:
                 route=args.route,
                 include_content=args.include_content,
                 echo_stdout=args.stdout,
+                source_scope=args.source_scope,
             )
         except OSError as exc:
             return _os_error(exc)
         if written == 0:
-            print("No stored completions found. Try `metergraphrelay demo openai` first.")
+            print(
+                "No stored completions found. Try `metergraphrelay demo openai` first."
+            )
             return 0
         print(f"Wrote {written} trace(s) to {args.output}")
         base_url = os.environ.get("METERGRAPH_INGEST_URL")

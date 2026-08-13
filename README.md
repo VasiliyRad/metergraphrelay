@@ -31,12 +31,12 @@ Create a `.env` file in your working directory:
 
 ## Quickstart
 
-    metergraphrelay pull openai -n 25 --output traces.jsonl
+    metergraphrelay pull openai -n 25 --source-scope my-openai-project --output traces.jsonl
     metergraphrelay push traces.jsonl
 
 Or do both in one step:
 
-    metergraphrelay sync openai -n 25 --output traces.jsonl
+    metergraphrelay sync openai -n 25 --source-scope my-openai-project --output traces.jsonl
 
 No stored completions yet? Generate a couple first:
 
@@ -62,11 +62,11 @@ Before enabling this in production:
 
 ## Commands
 
-    metergraphrelay pull openai -n 25 --output my-traces.jsonl --stdout --include-content --route my-app/support-bot
+    metergraphrelay pull openai -n 25 --source-scope my-openai-project --output my-traces.jsonl --stdout --include-content --route my-app/support-bot
     metergraphrelay demo openai --model gpt-4o-mini
     metergraphrelay push traces.jsonl
     metergraphrelay sync openai -n 25 --output my-traces.jsonl --route my-app/support-bot
-    metergraphrelay sync portkey export.jsonl --output converted.jsonl
+    metergraphrelay sync portkey export.jsonl --source-scope my-portkey-workspace --output converted.jsonl
 
 `sync openai` accepts the same flags as `pull openai`. It pulls to
 `--output` and immediately pushes that same file, checking both
@@ -103,11 +103,21 @@ metergraph's ingest API:
       "request_json": null,
       "response_text": null,
       "sdk": "metergraphrelay",
-      "sdk_version": "0.1.3"
+      "sdk_version": "0.4.0",
+      "import_source": "openai",
+      "import_source_scope": "my-openai-project",
+      "import_event_id": "chatcmpl-..."
     }
 
 `request_json`/`response_text` are populated only when `--include-content`
 is passed.
+
+Version 0.4 also emits deterministic namespaced trace/span IDs. Keep
+`--source-scope` stable for repeated imports of one provider project and use a
+different scope for independent projects. `push` batches versioned imports at
+500 rows / 4 MiB, retries a batch with the same run identity, and rejects files
+that mix legacy rows, sources, or scopes. Metergraph deduplicates and enriches
+by `(source, source scope, provider event ID)`.
 
 Every completion returned by the stored-completions list already succeeded,
 so `status` is always `"success"`. `error`/`error_type` flag a *partial*
@@ -135,7 +145,7 @@ set `LANGFUSE_BASE_URL` in `.env` (or pass `--base-url` per-command):
 
 **Quickstart:**
 
-    metergraphrelay pull langfuse -n 25 --output traces.jsonl
+    metergraphrelay pull langfuse -n 25 --source-scope my-langfuse-project --output traces.jsonl
     metergraphrelay push traces.jsonl
 
 With no other flags, this imports the latest 100 `GENERATION`
@@ -184,7 +194,7 @@ for you and never sees your Portkey account.
 
 **Quickstart:**
 
-    metergraphrelay sync portkey export.jsonl
+    metergraphrelay sync portkey export.jsonl --source-scope my-portkey-workspace
 
 Only `METERGRAPH_APP_TOKEN` is needed — there's no Portkey credential to
 configure.

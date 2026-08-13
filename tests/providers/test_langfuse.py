@@ -10,8 +10,8 @@ import pytest
 from metergraphrelay import __version__
 from metergraphrelay.providers.langfuse import (
     PAGE_LIMIT,
-    LangfuseAPIError,
     RESPONSE_FIELDS,
+    LangfuseAPIError,
     _map_content,
     _response_text,
     build_base_params,
@@ -284,8 +284,7 @@ def test_fetch_observations_page_builds_correct_url():
 
     request = mock_urlopen.call_args.args[0]
     assert request.full_url == (
-        "https://cloud.langfuse.com/api/public/v2/observations"
-        "?type=GENERATION&limit=10"
+        "https://cloud.langfuse.com/api/public/v2/observations?type=GENERATION&limit=10"
     )
 
 
@@ -296,7 +295,10 @@ def test_fetch_observations_page_returns_parsed_payload():
     ) as mock_urlopen:
         mock_urlopen.return_value = _mock_response(200, body)
         payload = fetch_observations_page(
-            "https://cloud.langfuse.com", public_key="pk-1", secret_key="sk-1", params={}
+            "https://cloud.langfuse.com",
+            public_key="pk-1",
+            secret_key="sk-1",
+            params={},
         )
 
     assert payload == {"data": [{"id": "obs-1"}], "meta": {"cursor": "abc"}}
@@ -410,7 +412,10 @@ def test_fetch_observations_page_omits_dangling_question_mark_when_params_empty(
     ) as mock_urlopen:
         mock_urlopen.return_value = _mock_response(200, body)
         fetch_observations_page(
-            "https://cloud.langfuse.com", public_key="pk-1", secret_key="sk-1", params={}
+            "https://cloud.langfuse.com",
+            public_key="pk-1",
+            secret_key="sk-1",
+            params={},
         )
 
     request = mock_urlopen.call_args.args[0]
@@ -540,7 +545,10 @@ def test_infer_provider_ignores_malformed_explicit_provider(
 
 
 def test_infer_provider_malformed_explicit_provider_and_no_model_match_returns_unknown():
-    observation = {"metadata": {"provider": 42}, "providedModelName": "some-custom-model"}
+    observation = {
+        "metadata": {"provider": 42},
+        "providedModelName": "some-custom-model",
+    }
     assert infer_provider(observation) == "unknown"
 
 
@@ -722,7 +730,7 @@ def test_normalize_observation_full_row():
 
     row = normalize_observation(observation, route_override=None)
 
-    assert row == {
+    expected = {
         "ts": "2026-08-07T12:00:00+00:00",
         "source": "langfuse",
         "sdk": "metergraphrelay",
@@ -742,12 +750,17 @@ def test_normalize_observation_full_row():
         "request_json": json.dumps([{"role": "user", "content": "hi"}]),
         "request_text": None,
         "response_text": "hello",
-        "trace_id": "trace-1",
-        "span_id": "obs-1",
-        "parent_span_id": None,
         "session_id": None,
         "environment": "production",
     }
+    assert {key: row[key] for key in expected} == expected
+    assert row["import_source"] == "langfuse"
+    assert row["import_source_scope"] == "default"
+    assert row["import_event_id"] == "obs-1"
+    assert row["source_trace_id"] == "trace-1"
+    assert len(row["trace_id"]) == 32
+    assert len(row["span_id"]) == 16
+    assert row["parent_span_id"] is None
 
 
 def test_normalize_observation_route_override_preserves_name_in_tags():
@@ -1167,13 +1180,16 @@ def test_pull_langfuse_uses_unique_tempfile_in_same_directory(tmp_path):
     output_path = tmp_path / "traces.jsonl"
     payload = {"data": [], "meta": {"cursor": None}}
 
-    with patch(
-        "metergraphrelay.providers.langfuse.fetch_observations_page",
-        return_value=payload,
-    ), patch(
-        "metergraphrelay.providers.langfuse.tempfile.mkstemp",
-        wraps=tempfile.mkstemp,
-    ) as mock_mkstemp:
+    with (
+        patch(
+            "metergraphrelay.providers.langfuse.fetch_observations_page",
+            return_value=payload,
+        ),
+        patch(
+            "metergraphrelay.providers.langfuse.tempfile.mkstemp",
+            wraps=tempfile.mkstemp,
+        ) as mock_mkstemp,
+    ):
         _call_pull_langfuse(output_path)
 
     mock_mkstemp.assert_called_once()
@@ -1191,12 +1207,15 @@ def test_pull_langfuse_temp_file_name_differs_across_invocations(tmp_path):
         seen_tmp_paths.append(path)
         return fd, path
 
-    with patch(
-        "metergraphrelay.providers.langfuse.fetch_observations_page",
-        return_value=payload,
-    ), patch(
-        "metergraphrelay.providers.langfuse.tempfile.mkstemp",
-        side_effect=spy_mkstemp,
+    with (
+        patch(
+            "metergraphrelay.providers.langfuse.fetch_observations_page",
+            return_value=payload,
+        ),
+        patch(
+            "metergraphrelay.providers.langfuse.tempfile.mkstemp",
+            side_effect=spy_mkstemp,
+        ),
     ):
         _call_pull_langfuse(output_path)
         _call_pull_langfuse(output_path)
@@ -1214,11 +1233,12 @@ def test_pull_langfuse_cleans_up_temp_file_on_write_failure(tmp_path):
     mock_file.__enter__.return_value = mock_file
     mock_file.__exit__.return_value = False
 
-    with patch(
-        "metergraphrelay.providers.langfuse.fetch_observations_page",
-        return_value=payload,
-    ), patch(
-        "metergraphrelay.providers.langfuse.os.fdopen", return_value=mock_file
+    with (
+        patch(
+            "metergraphrelay.providers.langfuse.fetch_observations_page",
+            return_value=payload,
+        ),
+        patch("metergraphrelay.providers.langfuse.os.fdopen", return_value=mock_file),
     ):
         with pytest.raises(OSError):
             _call_pull_langfuse(output_path)
@@ -1231,12 +1251,15 @@ def test_pull_langfuse_cleans_up_temp_file_on_replace_failure(tmp_path):
     output_path = tmp_path / "traces.jsonl"
     payload = {"data": [], "meta": {"cursor": None}}
 
-    with patch(
-        "metergraphrelay.providers.langfuse.fetch_observations_page",
-        return_value=payload,
-    ), patch(
-        "metergraphrelay.providers.langfuse.os.replace",
-        side_effect=OSError("permission denied"),
+    with (
+        patch(
+            "metergraphrelay.providers.langfuse.fetch_observations_page",
+            return_value=payload,
+        ),
+        patch(
+            "metergraphrelay.providers.langfuse.os.replace",
+            side_effect=OSError("permission denied"),
+        ),
     ):
         with pytest.raises(OSError):
             _call_pull_langfuse(output_path)
@@ -1249,12 +1272,15 @@ def test_pull_langfuse_cleans_up_temp_file_on_uncaught_normalize_error(tmp_path)
     output_path = tmp_path / "traces.jsonl"
     payload = {"data": [make_observation()], "meta": {"cursor": None}}
 
-    with patch(
-        "metergraphrelay.providers.langfuse.fetch_observations_page",
-        return_value=payload,
-    ), patch(
-        "metergraphrelay.providers.langfuse.normalize_observation",
-        side_effect=RuntimeError("unexpected bug"),
+    with (
+        patch(
+            "metergraphrelay.providers.langfuse.fetch_observations_page",
+            return_value=payload,
+        ),
+        patch(
+            "metergraphrelay.providers.langfuse.normalize_observation",
+            side_effect=RuntimeError("unexpected bug"),
+        ),
     ):
         with pytest.raises(RuntimeError):
             _call_pull_langfuse(output_path)
@@ -1277,11 +1303,12 @@ def test_pull_langfuse_treats_json_dumps_failure_as_malformed_row_skip(
             raise TypeError("not serializable")
         return real_dumps(obj, *args, **kwargs)
 
-    with patch(
-        "metergraphrelay.providers.langfuse.fetch_observations_page",
-        return_value=payload,
-    ), patch(
-        "metergraphrelay.providers.langfuse.json.dumps", side_effect=flaky_dumps
+    with (
+        patch(
+            "metergraphrelay.providers.langfuse.fetch_observations_page",
+            return_value=payload,
+        ),
+        patch("metergraphrelay.providers.langfuse.json.dumps", side_effect=flaky_dumps),
     ):
         imported, skipped = _call_pull_langfuse(output_path)
 
