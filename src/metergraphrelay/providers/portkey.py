@@ -56,7 +56,12 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
         )
 
     content = response.get("content")
-    if isinstance(content, list) and content:
+    if (
+        response.get("object") is None
+        and choices is None
+        and isinstance(content, list)
+        and content
+    ):
         text_parts = []
         tool_calls = []
         for block in content:
@@ -87,6 +92,8 @@ def normalize_portkey_row(row: dict) -> dict:
         elif isinstance(err, dict):
             message = err.get("message")
             error_type = message if isinstance(message, str) else json.dumps(err)
+        elif err is not None:
+            error_type = json.dumps(err)
 
     response_text, tool_calls = _extract_response(response)
     tool_names = _tool_names(tool_calls)

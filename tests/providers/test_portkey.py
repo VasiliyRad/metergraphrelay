@@ -195,6 +195,32 @@ def test_normalize_portkey_row_error_status_code_sets_error_fields():
     assert result["tool_calls"] is None
 
 
+@pytest.mark.parametrize(
+    "error_value", [["timeout", "retry-later"], 500, True]
+)
+def test_normalize_portkey_row_error_type_serializes_non_string_non_dict_error(
+    error_value,
+):
+    row = _responses_row(
+        response_status_code=500,
+        response={"error": error_value, "provider": "openai"},
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["error_type"] == json.dumps(error_value)
+
+
+def test_normalize_portkey_row_error_type_stays_none_when_error_key_absent():
+    row = _responses_row(
+        response_status_code=500, response={"provider": "openai"}
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["error_type"] is None
+
+
 @pytest.mark.parametrize("missing_field", ["id", "created_at", "trace_id"])
 def test_normalize_portkey_row_missing_required_field_raises_key_error(missing_field):
     row = _responses_row()
@@ -299,6 +325,32 @@ def test_normalize_portkey_row_unrecognized_response_shape_falls_back_to_json_du
     assert result["response_text"] == json.dumps({"unexpected": "shape"})
     assert result["tool_calls"] is None
     assert result["tool_names"] is None
+
+
+def test_normalize_portkey_row_anthropic_extraction_skipped_when_object_present():
+    response = {
+        "object": "unexpected",
+        "content": [{"type": "text", "text": "should not be used"}],
+    }
+    row = _responses_row(response=response)
+
+    result = normalize_portkey_row(row)
+
+    assert result["response_text"] == json.dumps(response)
+    assert result["tool_calls"] is None
+
+
+def test_normalize_portkey_row_anthropic_extraction_skipped_when_choices_present():
+    response = {
+        "choices": [],
+        "content": [{"type": "text", "text": "should not be used"}],
+    }
+    row = _responses_row(response=response)
+
+    result = normalize_portkey_row(row)
+
+    assert result["response_text"] == json.dumps(response)
+    assert result["tool_calls"] is None
 
 
 def test_convert_portkey_export_streams_and_counts(tmp_path):
@@ -524,3 +576,80 @@ def test_sync_help_lists_portkey_subcommand(capsys):
         build_parser().parse_args(["sync", "--help"])
 
     assert "portkey" in capsys.readouterr().out
+
+
+def test_main_sync_portkey_returns_clean_error_on_invalid_utf8_export(
+    tmp_path, capsys
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_bytes(b"\xff\xfe\x00\x01\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    exit_code = main(
+        [
+            "sync",
+            "portkey",
+            str(export_file),
+            "--output",
+            str(output_path),
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: ")
+    assert "Traceback" not in captured.err
+    assert not output_path.exists()
+
+
+def test_main_sync_portkey_returns_clean_error_when_output_directory_missing(
+    tmp_path, capsys
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text(json.dumps(_responses_row()) + "\n")
+    output_path = tmp_path / "missing-dir" / "converted.jsonl"
+
+    exit_code = main(
+        [
+            "sync",
+            "portkey",
+            str(export_file),
+            "--output",
+            str(output_path),
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: ")
+    assert "Traceback" not in captured.err
+
+
+def test_main_sync_portkey_zero_converted_summary_reports_all_counts(
+    tmp_path, capsys
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("not-json\n")
+
+    with patch("metergraphrelay.cli.push_file") as mock_push:
+        exit_code = main(
+            ["sync", "portkey", str(export_file), "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "Converted 0" in captured.out
+    assert "skipped 1" in captured.out
+    assert "pushed 0" in captured.out
+    assert "0 failed" in captured.out
+    mock_push.assert_not_called()

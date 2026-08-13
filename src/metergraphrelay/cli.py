@@ -238,7 +238,7 @@ def _config_error(exc: ConfigError) -> int:
     return 1
 
 
-def _os_error(exc: OSError) -> int:
+def _os_error(exc: OSError | UnicodeDecodeError) -> int:
     print(f"Error: {exc}", file=sys.stderr)
     return 1
 
@@ -276,18 +276,21 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         return _config_error(exc)
 
-    if args.output:
-        tmp_dir = os.path.dirname(args.output) or "."
-        fd, tmp_path = tempfile.mkstemp(
-            dir=tmp_dir, prefix=".portkey-sync-", suffix=".tmp"
-        )
-    else:
-        fd, tmp_path = tempfile.mkstemp(prefix="portkey-sync-", suffix=".jsonl")
-    os.close(fd)
+    try:
+        if args.output:
+            tmp_dir = os.path.dirname(args.output) or "."
+            fd, tmp_path = tempfile.mkstemp(
+                dir=tmp_dir, prefix=".portkey-sync-", suffix=".tmp"
+            )
+        else:
+            fd, tmp_path = tempfile.mkstemp(prefix="portkey-sync-", suffix=".jsonl")
+        os.close(fd)
+    except OSError as exc:
+        return _os_error(exc)
 
     try:
         converted, skipped = convert_portkey_export(args.export_file, tmp_path)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         _cleanup_temp_file(tmp_path)
         return _os_error(exc)
 
@@ -301,9 +304,8 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
     else:
         working_path = tmp_path
 
-    total = converted + skipped
     if converted == 0:
-        print(f"Converted 0 of {total} row(s); nothing to upload.")
+        print(f"Converted 0 row(s), skipped {skipped}, pushed 0 row(s), 0 failed.")
         if not args.output:
             _cleanup_temp_file(working_path)
         return 0
