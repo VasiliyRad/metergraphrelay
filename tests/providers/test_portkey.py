@@ -1,8 +1,11 @@
 import json
+import os
+from unittest.mock import patch
 
 import pytest
 
 from metergraphrelay import __version__
+from metergraphrelay.cli import build_parser, main
 from metergraphrelay.providers.portkey import (
     convert_portkey_export,
     normalize_portkey_row,
@@ -352,3 +355,172 @@ def test_convert_portkey_export_raises_oserror_on_missing_input(tmp_path):
 
     with pytest.raises(OSError):
         convert_portkey_export(str(tmp_path / "nope.jsonl"), str(output_path))
+
+
+def test_main_sync_portkey_missing_push_credential_returns_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("")
+
+    exit_code = main(["sync", "portkey", str(export_file), "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "METERGRAPH_APP_TOKEN" in captured.err
+
+
+def test_main_sync_portkey_missing_export_file_returns_clean_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    missing_file = tmp_path / "nope.jsonl"
+
+    exit_code = main(
+        ["sync", "portkey", str(missing_file), "--env-file", str(env_file)]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: ")
+    assert "nope.jsonl" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_sync_portkey_prints_converted_skipped_pushed_summary(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text(
+        json.dumps(_responses_row(id="row-1", trace_id="trace-1")) + "\n" + "not-json\n"
+    )
+
+    with patch("metergraphrelay.cli.push_file", return_value=(1, 0)):
+        exit_code = main(
+            ["sync", "portkey", str(export_file), "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "Converted 1" in captured.out
+    assert "skipped 1" in captured.out
+    assert "pushed 1" in captured.out
+
+
+def test_main_sync_portkey_returns_error_when_push_fails(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text(json.dumps(_responses_row()) + "\n")
+
+    with patch("metergraphrelay.cli.push_file", return_value=(0, 1)):
+        exit_code = main(
+            ["sync", "portkey", str(export_file), "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 1
+
+
+def test_main_sync_portkey_no_output_deletes_temp_file_after_successful_push(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text(json.dumps(_responses_row()) + "\n")
+
+    with patch("metergraphrelay.cli.push_file", return_value=(1, 0)) as mock_push:
+        exit_code = main(
+            ["sync", "portkey", str(export_file), "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 0
+    pushed_path = mock_push.call_args.args[0]
+    assert not os.path.exists(pushed_path)
+
+
+def test_main_sync_portkey_no_output_deletes_temp_file_after_failed_push(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text(json.dumps(_responses_row()) + "\n")
+
+    with patch("metergraphrelay.cli.push_file", return_value=(0, 1)) as mock_push:
+        exit_code = main(
+            ["sync", "portkey", str(export_file), "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 1
+    pushed_path = mock_push.call_args.args[0]
+    assert not os.path.exists(pushed_path)
+
+
+def test_main_sync_portkey_output_retained_after_failed_push(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text(json.dumps(_responses_row()) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    with patch("metergraphrelay.cli.push_file", return_value=(0, 1)):
+        exit_code = main(
+            [
+                "sync",
+                "portkey",
+                str(export_file),
+                "--output",
+                str(output_path),
+                "--env-file",
+                str(env_file),
+            ]
+        )
+
+    assert exit_code == 1
+    assert output_path.exists()
+    assert len(output_path.read_text().splitlines()) == 1
+
+
+def test_main_sync_portkey_output_retained_and_empty_when_all_rows_malformed(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("not-json\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    with patch("metergraphrelay.cli.push_file") as mock_push:
+        exit_code = main(
+            [
+                "sync",
+                "portkey",
+                str(export_file),
+                "--output",
+                str(output_path),
+                "--env-file",
+                str(env_file),
+            ]
+        )
+
+    assert exit_code == 0
+    assert output_path.exists()
+    assert output_path.read_text() == ""
+    mock_push.assert_not_called()
+
+
+def test_sync_portkey_help_documents_prerequisites(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sync", "portkey", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    for expected in [
+        "Portkey subscription",
+        "log export",
+        "never contacts Portkey",
+        "uploaded to MeterGraph",
+        "--output",
+        "--env-file",
+    ]:
+        assert expected in help_text, f"missing {expected!r} in --help output"
+
+
+def test_sync_help_lists_portkey_subcommand(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sync", "--help"])
+
+    assert "portkey" in capsys.readouterr().out

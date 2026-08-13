@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -12,6 +13,7 @@ from .config import ConfigError, require_credentials
 from .demo import run_demo
 from .providers.langfuse import DEFAULT_LANGFUSE_HOST, LangfuseAPIError, pull_langfuse
 from .providers.openai import pull_openai
+from .providers.portkey import convert_portkey_export
 from .push import push_file
 
 
@@ -177,6 +179,43 @@ def build_parser() -> argparse.ArgumentParser:
     sync_openai_parser.add_argument("--include-content", action="store_true")
     sync_openai_parser.add_argument("--env-file", default=".env")
 
+    sync_portkey_parser = sync_subparsers.add_parser(
+        "portkey",
+        description=(
+            "Convert a local Portkey JSONL log export into metergraph-native "
+            "JSONL and upload it. Requires a Portkey subscription with log "
+            "export enabled -- download the export from Portkey yourself "
+            "first; this command never contacts Portkey. Request and "
+            "response content from the export is uploaded to MeterGraph, "
+            "with no opt-out. With no --output, a private temporary "
+            "converted file is used and removed after upload; with "
+            "--output, the converted file is kept, including if the "
+            "upload fails."
+        ),
+        help=(
+            "Convert a local Portkey JSONL export and upload it to "
+            "metergraph; never contacts Portkey"
+        ),
+    )
+    sync_portkey_parser.add_argument(
+        "export_file",
+        metavar="EXPORT_FILE",
+        help="Path to a Portkey JSONL log export already downloaded from Portkey.",
+    )
+    sync_portkey_parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Path to write the converted metergraph-native JSONL. "
+            "(default: a private temporary file, removed after upload)"
+        ),
+    )
+    sync_portkey_parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Path to a .env file to load METERGRAPH_APP_TOKEN from. (default: .env)",
+    )
+
     demo_parser = subparsers.add_parser(
         "demo", help="Run 1-2 demo conversations with store=True"
     )
@@ -222,6 +261,69 @@ def _resolve_langfuse_credentials(args: argparse.Namespace) -> tuple[str, str]:
         return args.langfuse_public_key, args.langfuse_secret_key
     creds = require_credentials("langfuse", args.env_file)
     return creds["LANGFUSE_PUBLIC_KEY"], creds["LANGFUSE_SECRET_KEY"]
+
+
+def _cleanup_temp_file(tmp_path: str) -> None:
+    try:
+        os.remove(tmp_path)
+    except OSError:
+        pass
+
+
+def _run_sync_portkey(args: argparse.Namespace) -> int:
+    try:
+        push_creds = require_credentials("push", args.env_file)
+    except ConfigError as exc:
+        return _config_error(exc)
+
+    if args.output:
+        tmp_dir = os.path.dirname(args.output) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            dir=tmp_dir, prefix=".portkey-sync-", suffix=".tmp"
+        )
+    else:
+        fd, tmp_path = tempfile.mkstemp(prefix="portkey-sync-", suffix=".jsonl")
+    os.close(fd)
+
+    try:
+        converted, skipped = convert_portkey_export(args.export_file, tmp_path)
+    except OSError as exc:
+        _cleanup_temp_file(tmp_path)
+        return _os_error(exc)
+
+    if args.output:
+        try:
+            os.replace(tmp_path, args.output)
+        except OSError as exc:
+            _cleanup_temp_file(tmp_path)
+            return _os_error(exc)
+        working_path = args.output
+    else:
+        working_path = tmp_path
+
+    total = converted + skipped
+    if converted == 0:
+        print(f"Converted 0 of {total} row(s); nothing to upload.")
+        if not args.output:
+            _cleanup_temp_file(working_path)
+        return 0
+
+    base_url = os.environ.get("METERGRAPH_INGEST_URL")
+    try:
+        succeeded, failed = push_file(
+            working_path, push_creds["METERGRAPH_APP_TOKEN"], base_url=base_url
+        )
+    except OSError as exc:
+        return _os_error(exc)
+    finally:
+        if not args.output:
+            _cleanup_temp_file(working_path)
+
+    print(
+        f"Converted {converted} row(s), skipped {skipped}, "
+        f"pushed {succeeded} row(s), {failed} failed."
+    )
+    return 1 if failed else 0
 
 
 def _run_pull_langfuse(args: argparse.Namespace) -> int:
@@ -325,6 +427,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"Pushed {succeeded} row(s) to metergraph.")
         return 0
+
+    if args.command == "sync" and args.provider == "portkey":
+        return _run_sync_portkey(args)
 
     if args.command == "demo" and args.provider == "openai":
         try:
