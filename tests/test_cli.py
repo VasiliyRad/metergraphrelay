@@ -722,6 +722,50 @@ def test_sync_portkey_no_export_file_dispatches_to_api_mode(tmp_path):
     manual.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--source-scope", "ws-acme"),
+        ("--initial-since", "2026-08-01T00:00:00+00:00"),
+        ("--max-window-seconds", "1800"),
+    ],
+)
+def test_sync_portkey_manual_mode_rejects_api_only_flags(tmp_path, capsys, flag, value):
+    # A local EXPORT_FILE selects manual mode, which never contacts Portkey. The
+    # API-only flags would be silently ignored there, so passing one must fail fast
+    # with a clear error naming the flag rather than quietly dropping config.
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("")
+
+    exit_code = main(
+        ["sync", "portkey", str(export_file), flag, value, "--env-file", str(env_file)]
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert flag in err
+    assert "manual" in err.lower() or "EXPORT_FILE" in err
+
+
+def test_sync_portkey_manual_mode_with_output_still_works(tmp_path, capsys):
+    # Manual mode's own valid flag (--output) must keep working — the API-only
+    # rejection must not touch it.
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("")
+    out = tmp_path / "converted.jsonl"
+
+    exit_code = main(
+        ["sync", "portkey", str(export_file), "--output", str(out), "--env-file", str(env_file)]
+    )
+
+    assert exit_code == 0
+    assert "Converted 0 row(s)" in capsys.readouterr().out
+
+
 def test_sync_portkey_api_missing_portkey_credential_returns_error(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")

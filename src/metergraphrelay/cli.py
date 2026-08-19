@@ -327,6 +327,26 @@ def _cleanup_temp_file(tmp_path: str) -> None:
 
 
 def _run_sync_portkey(args: argparse.Namespace) -> int:
+    # A local EXPORT_FILE selects manual mode, which never contacts Portkey, so the
+    # API-cron-only flags have no effect here. Reject them up front (before touching
+    # credentials) instead of silently ignoring config the caller clearly intended.
+    api_only = [
+        flag
+        for flag, given in (
+            ("--source-scope", args.source_scope is not None),
+            ("--initial-since", args.initial_since is not None),
+            ("--max-window-seconds", args.max_window_seconds is not None),
+        )
+        if given
+    ]
+    if api_only:
+        print(
+            f"Error: {', '.join(api_only)} "
+            f"{'is' if len(api_only) == 1 else 'are'} only valid in Portkey API cron "
+            "mode (omit EXPORT_FILE); they have no effect in manual mode.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         push_creds = require_credentials("push", args.env_file)
     except ConfigError as exc:

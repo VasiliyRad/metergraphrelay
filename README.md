@@ -265,6 +265,17 @@ failure **releases the lease and exits nonzero** so cron surfaces it and
 the next run resumes cleanly. If the process crashes outright, no cleanup
 runs and the server's lease simply expires, freeing the next run.
 
+**A window advances only on a fully successful upload.** By design the
+run marks the window complete **only when every row uploads with zero
+failures** — there is no poison-row skipping, dead-letter queue, or
+partial checkpoint, so nothing is ever silently dropped. If some rows are
+**persistently rejected** (for example, a row the ingest API keeps
+refusing), the run releases the lease and exits nonzero, and **the same
+window stays pending** and is retried on the next cron run. It will keep
+failing on that window until you correct the underlying cause, so cron
+cannot advance past bad data on its own — investigate the reported error
+rather than expecting the next run to skip it.
+
 **High-volume windows.** If a one-hour window holds **more than 50,000
 records**, the run splits it **once** into **10 sub-windows with
 1-second overlaps** and pulls all ten together (source-event dedup
