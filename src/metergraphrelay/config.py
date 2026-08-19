@@ -13,6 +13,7 @@ CREDENTIAL_SPECS: dict[str, list[str]] = {
     "openai": ["OPENAI_API_KEY"],
     "anthropic": ["ANTHROPIC_API_KEY"],
     "langfuse": ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
+    "portkey": ["PORTKEY_API_KEY"],
     "push": ["METERGRAPH_APP_TOKEN"],
 }
 

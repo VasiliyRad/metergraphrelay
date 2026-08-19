@@ -7,6 +7,8 @@ import pytest
 from metergraphrelay import __version__
 from metergraphrelay.cli import build_parser, main
 from metergraphrelay.providers.portkey import (
+    ImportContext,
+    PortkeyConversionError,
     convert_portkey_export,
     normalize_portkey_row,
 )
@@ -633,6 +635,149 @@ def test_main_sync_portkey_returns_clean_error_when_output_directory_missing(
     assert "Traceback" not in captured.err
 
 
+def test_normalize_portkey_row_without_import_context_omits_import_fields():
+    result = normalize_portkey_row(_responses_row())
+    assert "import_source" not in result
+    assert "import_source_scope" not in result
+    assert "import_event_id" not in result
+
+
+def test_normalize_portkey_row_with_import_context_adds_dedup_fields():
+    ctx = ImportContext(source="portkey", source_scope="ws-acme")
+    result = normalize_portkey_row(_responses_row(id="pk-req-1"), import_context=ctx)
+    assert result["import_source"] == "portkey"
+    assert result["import_source_scope"] == "ws-acme"
+    assert result["import_event_id"] == "pk-req-1"
+    # import_event_id is the stable Portkey request id, same value as request_id.
+    assert result["import_event_id"] == result["request_id"]
+
+
+def test_convert_portkey_export_threads_import_context_into_every_row(tmp_path):
+    ctx = ImportContext(source="portkey", source_scope="ws-acme")
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(
+        json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n"
+        + json.dumps(_chat_completion_row(id="row-2", trace_id="t-2")) + "\n"
+    )
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(
+        str(input_path), str(output_path), import_context=ctx
+    )
+
+    assert (converted, skipped) == (2, 0)
+    rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+    assert [r["import_event_id"] for r in rows] == ["row-1", "row-2"]
+    assert all(r["import_source"] == "portkey" for r in rows)
+    assert all(r["import_source_scope"] == "ws-acme" for r in rows)
+
+
+def test_convert_portkey_export_without_context_keeps_rows_free_of_import_fields(
+    tmp_path,
+):
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    convert_portkey_export(str(input_path), str(output_path))
+
+    row = json.loads(output_path.read_text().splitlines()[0])
+    assert "import_source" not in row
+
+
+# --- API-mode import_event_id identity validation (metergraph-internal requires
+# a stripped string of length 1..512; a bad id fails the async worker's batch
+# after upload, so API mode must reject it locally and fail the window). ---
+
+_IMPORT_CTX = ImportContext(source="portkey", source_scope="ws-acme")
+
+
+def test_portkey_conversion_error_is_a_value_error():
+    # Consistent with the module's existing convention of ValueError-family errors.
+    assert issubclass(PortkeyConversionError, ValueError)
+
+
+def test_normalize_portkey_row_import_mode_rejects_missing_id():
+    row = _responses_row()
+    del row["id"]
+    with pytest.raises(PortkeyConversionError):
+        normalize_portkey_row(row, import_context=_IMPORT_CTX)
+
+
+def test_normalize_portkey_row_import_mode_rejects_none_id():
+    with pytest.raises(PortkeyConversionError):
+        normalize_portkey_row(_responses_row(id=None), import_context=_IMPORT_CTX)
+
+
+def test_normalize_portkey_row_import_mode_rejects_blank_id():
+    with pytest.raises(PortkeyConversionError):
+        normalize_portkey_row(_responses_row(id=""), import_context=_IMPORT_CTX)
+
+
+def test_normalize_portkey_row_import_mode_rejects_whitespace_only_id():
+    with pytest.raises(PortkeyConversionError):
+        normalize_portkey_row(_responses_row(id="   "), import_context=_IMPORT_CTX)
+
+
+@pytest.mark.parametrize("bad_id", [123, 12.5, True, ["pk-1"], {"id": "pk-1"}])
+def test_normalize_portkey_row_import_mode_rejects_non_string_id(bad_id):
+    with pytest.raises(PortkeyConversionError):
+        normalize_portkey_row(_responses_row(id=bad_id), import_context=_IMPORT_CTX)
+
+
+def test_normalize_portkey_row_import_mode_rejects_id_longer_than_512():
+    with pytest.raises(PortkeyConversionError):
+        normalize_portkey_row(
+            _responses_row(id="a" * 513), import_context=_IMPORT_CTX
+        )
+
+
+def test_normalize_portkey_row_import_mode_accepts_id_of_exactly_512():
+    max_id = "a" * 512
+    result = normalize_portkey_row(
+        _responses_row(id=max_id), import_context=_IMPORT_CTX
+    )
+    assert result["import_event_id"] == max_id
+
+
+def test_normalize_portkey_row_import_mode_strips_id_to_canonical_value():
+    result = normalize_portkey_row(
+        _responses_row(id="  pk-req-9  "), import_context=_IMPORT_CTX
+    )
+    assert result["import_event_id"] == "pk-req-9"
+
+
+def test_convert_portkey_export_import_mode_fails_window_on_invalid_id(tmp_path):
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(
+        json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n"
+        + json.dumps(_responses_row(id="", trace_id="t-2")) + "\n"
+    )
+    output_path = tmp_path / "converted.jsonl"
+
+    # The bad imported id must fail the whole conversion/window, not be skipped —
+    # a silent skip would let the server checkpoint complete missing records.
+    with pytest.raises(PortkeyConversionError):
+        convert_portkey_export(
+            str(input_path), str(output_path), import_context=_IMPORT_CTX
+        )
+
+
+def test_convert_portkey_export_manual_mode_accepts_blank_id_unchanged(tmp_path):
+    # Backward compatibility: the same blank id that fails API mode is passed
+    # through untouched in manual mode (no import_context) — no new failures.
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+
+    assert (converted, skipped) == (1, 0)
+    row = json.loads(output_path.read_text().splitlines()[0])
+    assert row["request_id"] == ""
+    assert "import_event_id" not in row
+
+
 def test_main_sync_portkey_zero_converted_summary_reports_all_counts(
     tmp_path, capsys
 ):
@@ -653,3 +798,48 @@ def test_main_sync_portkey_zero_converted_summary_reports_all_counts(
     assert "pushed 0" in captured.out
     assert "0 failed" in captured.out
     mock_push.assert_not_called()
+
+
+class _StopConvert(Exception):
+    """Sentinel raised from on_progress to prove convert does not swallow it."""
+
+
+def test_convert_portkey_export_invokes_on_progress_per_processed_row(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    good_1 = _responses_row(id="row-1", trace_id="trace-1")
+    good_2 = _chat_completion_row(id="row-2", trace_id="trace-2")
+    # A good row, a malformed line, another good row -> three processed lines.
+    input_path.write_text(
+        json.dumps(good_1) + "\n" + "not-json\n" + json.dumps(good_2) + "\n"
+    )
+    output_path = tmp_path / "converted.jsonl"
+    ticks = []
+
+    converted, skipped = convert_portkey_export(
+        str(input_path), str(output_path), on_progress=lambda: ticks.append(1)
+    )
+
+    assert (converted, skipped) == (2, 1)
+    assert len(ticks) == 3  # fires once per non-blank line, converted or skipped
+
+
+def test_convert_portkey_export_without_on_progress_is_unchanged(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+
+    assert (converted, skipped) == (1, 0)  # default None on_progress: unchanged
+
+
+def test_convert_portkey_export_propagates_on_progress_exception(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    def _boom():
+        raise _StopConvert()
+
+    with pytest.raises(_StopConvert):
+        convert_portkey_export(str(input_path), str(output_path), on_progress=_boom)

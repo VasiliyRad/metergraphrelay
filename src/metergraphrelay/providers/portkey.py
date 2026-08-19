@@ -2,9 +2,23 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from .. import __version__
+
+
+@dataclass(frozen=True)
+class ImportContext:
+    source: str
+    source_scope: str
+
+
+class PortkeyConversionError(ValueError):
+    """Raised when a row cannot be converted for import (e.g. an unusable
+    ``import_event_id``). Subclasses ValueError so it is never swallowed by the
+    per-row ``KeyError``/``TypeError``/``AttributeError`` skip path — an invalid
+    imported id must fail the whole window, not silently drop a record."""
 
 
 def _tool_call_name(call: Any) -> str | None:
@@ -76,7 +90,40 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
     return json.dumps(response), None
 
 
-def normalize_portkey_row(row: dict) -> dict:
+IMPORT_EVENT_ID_MAX_LENGTH = 512
+
+
+def _canonical_import_event_id(raw: Any) -> str:
+    """Validate a Portkey row id for use as ``import_event_id``.
+
+    metergraph-internal's import identity validator requires a string whose
+    stripped length is 1..512; a numeric, blank, or oversized id would make the
+    async import worker fail the whole batch *after* the relay has uploaded it.
+    Reject it here so API mode fails the window before upload. ``bool`` is an
+    ``int`` subclass, so it is rejected as a non-string.
+    """
+    if not isinstance(raw, str):
+        raise PortkeyConversionError(
+            f"import_event_id must be a string, got {type(raw).__name__}"
+        )
+    canonical = raw.strip()
+    if not 1 <= len(canonical) <= IMPORT_EVENT_ID_MAX_LENGTH:
+        raise PortkeyConversionError(
+            "import_event_id must be 1.."
+            f"{IMPORT_EVENT_ID_MAX_LENGTH} characters after stripping, "
+            f"got length {len(canonical)}"
+        )
+    return canonical
+
+
+def normalize_portkey_row(
+    row: dict, *, import_context: ImportContext | None = None
+) -> dict:
+    import_event_id = None
+    if import_context is not None:
+        # Validate the imported id before anything else so a bad id fails the
+        # window cleanly (row.get avoids a KeyError being swallowed as a skip).
+        import_event_id = _canonical_import_event_id(row.get("id"))
     ts = row["created_at"]
     request_id = row["id"]
     trace_id = row["trace_id"]
@@ -109,7 +156,7 @@ def normalize_portkey_row(row: dict) -> dict:
     cost = row.get("cost")
     cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
 
-    return {
+    result = {
         "ts": ts,
         "provider": row.get("ai_org"),
         "model": row.get("ai_model"),
@@ -133,9 +180,28 @@ def normalize_portkey_row(row: dict) -> dict:
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    if import_context is not None:
+        result["import_source"] = import_context.source
+        result["import_source_scope"] = import_context.source_scope
+        result["import_event_id"] = import_event_id  # validated, stripped id
+    return result
 
 
-def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]:
+def convert_portkey_export(
+    input_path: str,
+    output_path: str,
+    *,
+    import_context: ImportContext | None = None,
+    on_progress: Callable[[], None] | None = None,
+) -> tuple[int, int]:
+    """Normalize a Portkey export JSONL to MeterGraph rows, returning (converted, skipped).
+
+    ``on_progress``, if given, is invoked once per processed (non-blank) line —
+    converted or skipped — so a caller can renew a lease during a long
+    normalization. Any exception it raises propagates (a lost lease must abort the
+    conversion). It defaults to ``None`` so manual mode and existing callers are
+    unchanged.
+    """
     converted = 0
     skipped = 0
     with open(input_path) as src, open(output_path, "w") as dst:
@@ -143,6 +209,8 @@ def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]
             line = line.strip()
             if not line:
                 continue
+            if on_progress is not None:
+                on_progress()
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -153,7 +221,7 @@ def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]
                 )
                 continue
             try:
-                normalized = normalize_portkey_row(row)
+                normalized = normalize_portkey_row(row, import_context=import_context)
                 serialized = json.dumps(normalized)
             except (KeyError, TypeError, AttributeError) as exc:
                 skipped += 1

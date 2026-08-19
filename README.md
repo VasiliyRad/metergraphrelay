@@ -76,8 +76,11 @@ instead of pulling data it can't push.
 `pull anthropic` accepts the same shape but isn't implemented yet — it
 checks for `ANTHROPIC_API_KEY` and reports accordingly. `pull langfuse`
 is implemented — see [Pull from Langfuse](#pull-from-langfuse) below.
-`sync portkey` converts a local Portkey export instead of pulling from
-an API — see [Sync from Portkey](#sync-from-portkey) below.
+`sync portkey` runs in two modes: give it a local `EXPORT_FILE` to
+convert a Portkey export you downloaded yourself
+([Sync from Portkey](#sync-from-portkey)), or omit the file to pull a
+window directly from the Portkey Logs Export API on a cron
+([Sync from Portkey (API cron mode)](#sync-from-portkey-api-cron-mode)).
 
 All subcommands accept `--env-file PATH`.
 
@@ -175,8 +178,10 @@ Full flag reference: `metergraphrelay pull langfuse --help`.
 ## Sync from Portkey
 
 Convert a Portkey JSONL log export you've already downloaded into
-metergraph-native JSONL and upload it in one step. This command never
-contacts Portkey — it only reads a local file.
+metergraph-native JSONL and upload it in one step. In this manual mode
+the command never contacts Portkey — it only reads a local file. To
+pull from the Portkey API instead, omit the file — see
+[Sync from Portkey (API cron mode)](#sync-from-portkey-api-cron-mode).
 
 Requires a Portkey subscription with log export enabled. Download the
 export from Portkey yourself first; `metergraphrelay` doesn't fetch it
@@ -199,6 +204,90 @@ temporary one that's deleted after upload:
 
 **Before running this against your own export:** request and response
 content from the export is uploaded to MeterGraph, with no opt-out.
+
+Full flag reference: `metergraphrelay sync portkey --help`.
+
+## Sync from Portkey (API cron mode)
+
+Run `sync portkey` with **no `EXPORT_FILE`** and it pulls a window of
+logs directly from the Portkey **Logs Export API** (unlike manual mode,
+this contacts Portkey) and pushes them to metergraph in one step. It is
+designed to run unattended from cron.
+
+**Setup:** in addition to `METERGRAPH_APP_TOKEN`, this mode requires
+`PORTKEY_API_KEY` (a secret) in `.env`. The key must have the
+**`logs.export`** scope. Note that Portkey **Logs Export is currently an
+Enterprise-plan-only feature** — a key without that entitlement reaches
+the API but is rejected at authorization:
+
+    METERGRAPH_APP_TOKEN=your-metergraph-token-here
+    PORTKEY_API_KEY=pk-your-portkey-key-here
+
+You also name one Portkey workspace with `--source-scope` (or
+`$PORTKEY_WORKSPACE`). This is the stable Portkey **workspace id, not a
+secret** — it's safe in logs, `--help`, and error text. One Portkey
+workspace per metergraph app for this MVP.
+
+    # PORTKEY_WORKSPACE=ws-your-workspace-id
+
+Two optional env vars override endpoints. `PORTKEY_BASE_URL` points at a
+self-hosted Portkey — include the `/v1` API-version prefix, matching the
+default public base `https://api.portkey.ai/v1`; `METERGRAPH_INGEST_URL`
+points at a non-default metergraph ingest host (the same host `push` uses):
+
+    # PORTKEY_BASE_URL=https://api.portkey.ai/v1
+    # METERGRAPH_INGEST_URL=https://ingest.metergraph.dev
+
+**How windows and resume work.** Each run pulls a fixed logical window
+of at most **one hour** (`--max-window-seconds` caps it, 1–3600, default
+3600). The metergraph import-sync **server owns all resume state**: it
+tracks the checkpoint, applies a **5-minute overlap** between windows,
+and hands out a **15-minute renewable lease** per run. The relay keeps
+**no local checkpoint files** — nothing to back up, and it's safe to run
+the same command from many machines. Overlap re-pulled rows are
+deduplicated server-side by source event id, so overlap never
+double-counts.
+
+**`--initial-since`** seeds only the *first* run for a workspace (the
+server needs a starting point when it has no state yet). Once state
+exists the server **ignores** it, so cron can safely pass it on every
+run:
+
+    metergraphrelay sync portkey --source-scope ws-acme --initial-since 2026-08-01T00:00:00+00:00
+
+**Cron example** — hourly, customer-managed, no local state, safe for
+overlapping runs (passes `--initial-since` every run by design):
+
+    # Hourly customer-managed cron (no local state, safe to overlap runs):
+    0 * * * * metergraphrelay sync portkey --source-scope ws-acme --initial-since 2026-08-01T00:00:00+00:00
+
+**Exit behavior (cron-friendly).** Both a **`busy`** lease (another run
+already holds it) and a **`caught_up`** server response are clean no-op
+**exit 0** — a cron overlap or an idle hour is not an error. A handled
+failure **releases the lease and exits nonzero** so cron surfaces it and
+the next run resumes cleanly. If the process crashes outright, no cleanup
+runs and the server's lease simply expires, freeing the next run.
+
+**A window advances only on a fully successful upload.** By design the
+run marks the window complete **only when every row uploads with zero
+failures** — there is no poison-row skipping, dead-letter queue, or
+partial checkpoint, so nothing is ever silently dropped. If some rows are
+**persistently rejected** (for example, a row the ingest API keeps
+refusing), the run releases the lease and exits nonzero, and **the same
+window stays pending** and is retried on the next cron run. It will keep
+failing on that window until you correct the underlying cause, so cron
+cannot advance past bad data on its own — investigate the reported error
+rather than expecting the next run to skip it.
+
+**High-volume windows.** If a one-hour window holds **more than 50,000
+records**, the run splits it **once** into **10 sub-windows with
+1-second overlaps** and pulls all ten together (source-event dedup
+absorbs the boundary overlaps). This split is one-shot, never recursive:
+if any single sub-window *still* exceeds 50,000 records, the run fails
+with a clear error rather than splitting further.
+
+**Before running this against your own data:** as in manual mode,
+request and response content is uploaded to metergraph, with no opt-out.
 
 Full flag reference: `metergraphrelay sync portkey --help`.
 

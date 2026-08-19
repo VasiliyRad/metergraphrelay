@@ -11,10 +11,14 @@ from openai import OpenAI
 
 from .config import ConfigError, require_credentials
 from .demo import run_demo
+from .metergraph_sync import MeterGraphSyncClient, MeterGraphSyncError
+from .portkey_sync import run_portkey_sync
 from .providers.langfuse import DEFAULT_LANGFUSE_HOST, LangfuseAPIError, pull_langfuse
 from .providers.openai import pull_openai
 from .providers.portkey import convert_portkey_export
-from .push import push_file
+from .providers.portkey_export import PortkeyExportClient, PortkeyExportError
+from .push import DEFAULT_INGEST_URL, push_file
+from .window import normalize_utc_designator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -182,38 +186,92 @@ def build_parser() -> argparse.ArgumentParser:
     sync_portkey_parser = sync_subparsers.add_parser(
         "portkey",
         description=(
-            "Convert a local Portkey JSONL log export into metergraph-native "
-            "JSONL and upload it. Requires a Portkey subscription with log "
-            "export enabled -- download the export from Portkey yourself "
-            "first; this command never contacts Portkey. Request and "
-            "response content from the export is uploaded to MeterGraph, "
-            "with no opt-out. With no --output, a private temporary "
-            "converted file is used and removed after upload; with "
-            "--output, the converted file is kept, including if the "
-            "upload fails."
+            "Sync Portkey LLM traces to metergraph in one of two modes.\n"
+            "\n"
+            "MANUAL MODE (an EXPORT_FILE is given): convert a local Portkey "
+            "JSONL log export into metergraph-native JSONL and upload it. "
+            "Requires a Portkey subscription with log export enabled -- "
+            "download the export from Portkey yourself first; manual mode "
+            "never contacts Portkey. With no --output, a private temporary "
+            "converted file is used and removed after upload; with --output, "
+            "the converted file is kept, including if the upload fails.\n"
+            "\n"
+            "API CRON MODE (no EXPORT_FILE): pull a fixed logical time window "
+            "from the Portkey Logs Export API and push it to metergraph, with "
+            "acquire/resume/complete coordinated entirely by the metergraph "
+            "import-sync server -- safe to run from cron and idempotent, with "
+            "no local checkpoint files. Requires PORTKEY_API_KEY (secret) -- a "
+            "Portkey key with the logs.export scope; Logs Export is currently an "
+            "Enterprise-plan-only feature -- and METERGRAPH_APP_TOKEN (secret) in "
+            "the env / --env-file, plus a "
+            "workspace via --source-scope or $PORTKEY_WORKSPACE. Optional env: "
+            "$PORTKEY_BASE_URL (default the Portkey public API), "
+            "$METERGRAPH_INGEST_URL (default the metergraph ingest host). "
+            "--initial-since seeds only the first run; --max-window-seconds "
+            "caps the window at 3600. One Portkey workspace per metergraph app "
+            "(MVP). A 'busy' lease or a 'caught up' server exit 0 as clean "
+            "no-ops. In both modes request and response content is uploaded to "
+            "MeterGraph with no opt-out."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         help=(
-            "Convert a local Portkey JSONL export and upload it to "
-            "metergraph; never contacts Portkey"
+            "Sync Portkey traces to metergraph: manual (local EXPORT_FILE) "
+            "or API cron mode (no EXPORT_FILE, pulls from Portkey)"
         ),
     )
     sync_portkey_parser.add_argument(
         "export_file",
         metavar="EXPORT_FILE",
-        help="Path to a Portkey JSONL log export already downloaded from Portkey.",
+        nargs="?",
+        default=None,
+        help=(
+            "Path to a Portkey JSONL log export already downloaded from "
+            "Portkey (manual mode). Omit to use Portkey API cron mode."
+        ),
+    )
+    sync_portkey_parser.add_argument(
+        "--source-scope",
+        default=None,
+        help=(
+            "Portkey workspace identifier for API cron mode (falls back to "
+            "$PORTKEY_WORKSPACE). This is the stable workspace id, not a "
+            "secret. One workspace per metergraph app (MVP)."
+        ),
+    )
+    sync_portkey_parser.add_argument(
+        "--initial-since",
+        default=None,
+        help=(
+            "Aware ISO 8601 timestamp seeding the first sync window (API "
+            "mode). Required only on the very first run; the server ignores "
+            "it once state exists, so cron may pass it every run."
+        ),
+    )
+    sync_portkey_parser.add_argument(
+        "--max-window-seconds",
+        type=int,
+        default=None,
+        help=(
+            "Maximum logical window length in seconds (API mode, 1-3600). "
+            "(default: 3600)"
+        ),
     )
     sync_portkey_parser.add_argument(
         "--output",
         default=None,
         help=(
-            "Path to write the converted metergraph-native JSONL. "
-            "(default: a private temporary file, removed after upload)"
+            "Path to write the converted metergraph-native JSONL (manual "
+            "mode only). (default: a private temporary file, removed after "
+            "upload)"
         ),
     )
     sync_portkey_parser.add_argument(
         "--env-file",
         default=".env",
-        help="Path to a .env file to load METERGRAPH_APP_TOKEN from. (default: .env)",
+        help=(
+            "Path to a .env file to load credentials from: METERGRAPH_APP_TOKEN "
+            "(both modes) and PORTKEY_API_KEY (API mode). (default: .env)"
+        ),
     )
 
     demo_parser = subparsers.add_parser(
@@ -271,6 +329,26 @@ def _cleanup_temp_file(tmp_path: str) -> None:
 
 
 def _run_sync_portkey(args: argparse.Namespace) -> int:
+    # A local EXPORT_FILE selects manual mode, which never contacts Portkey, so the
+    # API-cron-only flags have no effect here. Reject them up front (before touching
+    # credentials) instead of silently ignoring config the caller clearly intended.
+    api_only = [
+        flag
+        for flag, given in (
+            ("--source-scope", args.source_scope is not None),
+            ("--initial-since", args.initial_since is not None),
+            ("--max-window-seconds", args.max_window_seconds is not None),
+        )
+        if given
+    ]
+    if api_only:
+        print(
+            f"Error: {', '.join(api_only)} "
+            f"{'is' if len(api_only) == 1 else 'are'} only valid in Portkey API cron "
+            "mode (omit EXPORT_FILE); they have no effect in manual mode.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         push_creds = require_credentials("push", args.env_file)
     except ConfigError as exc:
@@ -326,6 +404,81 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
         f"pushed {succeeded} row(s), {failed} failed."
     )
     return 1 if failed else 0
+
+
+def _validate_initial_since(value: str) -> None:
+    # Local, best-effort guard: the window contract requires an aware ISO 8601
+    # timestamp. The server is the authority on whether initial_since is needed
+    # at all (only on first-run state), so we validate the format when given but
+    # never require it here. Not a secret, so echoing the bad value is safe.
+    try:
+        parsed = datetime.fromisoformat(normalize_utc_designator(value))
+    except ValueError as exc:
+        raise ConfigError(
+            f"--initial-since must be an ISO 8601 timestamp, got {value!r}: {exc}"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise ConfigError(
+            f"--initial-since must be timezone-aware (include an offset such as "
+            f"+00:00), got naive value {value!r}."
+        )
+
+
+def _run_sync_portkey_api(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        print(
+            "Error: --output is only valid with a local EXPORT_FILE (manual mode).",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        portkey_creds = require_credentials("portkey", args.env_file)
+        push_creds = require_credentials("push", args.env_file)
+    except ConfigError as exc:
+        return _config_error(exc)
+    # require_credentials() has now loaded the env file; non-secret config can be read.
+    source_scope = args.source_scope or os.environ.get("PORTKEY_WORKSPACE")
+    if not source_scope:
+        return _config_error(
+            ConfigError(
+                "source scope not set. Pass --source-scope or set PORTKEY_WORKSPACE "
+                "(the Portkey workspace id; not a secret)."
+            )
+        )
+    if args.initial_since is not None:
+        try:
+            _validate_initial_since(args.initial_since)
+        except ConfigError as exc:
+            return _config_error(exc)
+    max_window = args.max_window_seconds if args.max_window_seconds is not None else 3600
+    if max_window <= 0 or max_window > 3600:
+        return _config_error(
+            ConfigError("--max-window-seconds must be between 1 and 3600.")
+        )
+    ingest_base = os.environ.get("METERGRAPH_INGEST_URL")
+    portkey_base = os.environ.get("PORTKEY_BASE_URL")
+    mg_client = MeterGraphSyncClient(
+        ingest_base or DEFAULT_INGEST_URL, push_creds["METERGRAPH_APP_TOKEN"]
+    )
+    pk_kwargs = {"workspace": source_scope}
+    if portkey_base:
+        pk_kwargs["base_url"] = portkey_base
+    pk_client = PortkeyExportClient(portkey_creds["PORTKEY_API_KEY"], **pk_kwargs)
+    try:
+        outcome = run_portkey_sync(
+            mg_client=mg_client,
+            pk_client=pk_client,
+            source_scope=source_scope,
+            initial_since=args.initial_since,
+            max_window_seconds=max_window,
+            push_token=push_creds["METERGRAPH_APP_TOKEN"],
+            ingest_base_url=ingest_base,
+        )
+    except (MeterGraphSyncError, PortkeyExportError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(outcome.detail)
+    return outcome.exit_code
 
 
 def _run_pull_langfuse(args: argparse.Namespace) -> int:
@@ -431,7 +584,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "sync" and args.provider == "portkey":
-        return _run_sync_portkey(args)
+        if args.export_file is not None:
+            return _run_sync_portkey(args)
+        return _run_sync_portkey_api(args)
 
     if args.command == "demo" and args.provider == "openai":
         try:
