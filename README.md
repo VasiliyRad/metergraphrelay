@@ -179,9 +179,9 @@ Full flag reference: `metergraphrelay pull langfuse --help`.
 
 Convert a Portkey JSONL log export you've already downloaded into
 metergraph-native JSONL and upload it in one step. In this manual mode
-the command never contacts Portkey — it only reads a local file. (To
+the command never contacts Portkey — it only reads a local file. To
 pull from the Portkey API instead, omit the file — see
-[Sync from Portkey (API cron mode)](#sync-from-portkey-api-cron-mode).)
+[Sync from Portkey (API cron mode)](#sync-from-portkey-api-cron-mode).
 
 Requires a Portkey subscription with log export enabled. Download the
 export from Portkey yourself first; `metergraphrelay` doesn't fetch it
@@ -228,10 +228,11 @@ workspace per metergraph app for this MVP.
     # PORTKEY_WORKSPACE=ws-your-workspace-id
 
 Two optional env vars override endpoints. `PORTKEY_BASE_URL` points at a
-self-hosted Portkey (default: the Portkey public API); `METERGRAPH_INGEST_URL`
+self-hosted Portkey — include the `/v1` API-version prefix, matching the
+default public base `https://api.portkey.ai/v1`; `METERGRAPH_INGEST_URL`
 points at a non-default metergraph ingest host (the same host `push` uses):
 
-    # PORTKEY_BASE_URL=https://api.portkey.ai
+    # PORTKEY_BASE_URL=https://api.portkey.ai/v1
     # METERGRAPH_INGEST_URL=https://ingest.metergraph.dev
 
 **How windows and resume work.** Each run pulls a fixed logical window

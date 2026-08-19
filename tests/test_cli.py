@@ -949,3 +949,21 @@ def test_readme_portkey_cron_example_parses():
         ["sync", "portkey", "--source-scope", "ws-acme",
          "--initial-since", "2026-08-01T00:00:00+00:00"]
     )
+
+
+def test_docs_portkey_base_url_matches_client_default():
+    # The documented default/public Portkey base must include the /v1 prefix
+    # the client actually uses, so operators don't configure a base missing it.
+    from metergraphrelay.providers.portkey_export import DEFAULT_PORTKEY_URL
+
+    assert DEFAULT_PORTKEY_URL == "https://api.portkey.ai/v1"
+    root = Path(__file__).parent.parent
+    readme = (root / "README.md").read_text()
+    env_example = (root / ".env.example").read_text()
+    assert DEFAULT_PORTKEY_URL in readme
+    assert DEFAULT_PORTKEY_URL in env_example
+    # No bare host (missing /v1) left as a concrete example anywhere in the docs.
+    assert "api.portkey.ai\n" not in readme
+    assert "api.portkey.ai " not in readme
+    assert "api.portkey.ai\n" not in env_example
+    assert "api.portkey.ai " not in env_example
