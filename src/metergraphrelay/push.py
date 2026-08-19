@@ -4,13 +4,27 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from typing import Callable
 
 DEFAULT_INGEST_URL = "https://d2xus7mp8zdv6t.cloudfront.net"
 
 
 def push_file(
-    file_path: str, token: str, base_url: str | None = None
+    file_path: str,
+    token: str,
+    base_url: str | None = None,
+    *,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
+    """Upload each JSONL row to the ingest endpoint, returning (succeeded, failed).
+
+    ``on_progress``, if given, is invoked once per processed row (one HTTP request
+    per row means a large file can outlive a lease, so a caller can use this hook to
+    renew mid-upload). It fires for every non-blank line — successful, failed, or
+    malformed — and any exception it raises is allowed to propagate (a lost lease
+    must abort the upload, not be swallowed). It defaults to ``None`` so existing
+    callers and manual mode are unchanged.
+    """
     url = f"{(base_url or DEFAULT_INGEST_URL).rstrip('/')}/v1/ingest"
     succeeded = 0
     failed = 0
@@ -19,6 +33,8 @@ def push_file(
             line = line.strip()
             if not line:
                 continue
+            if on_progress is not None:
+                on_progress()
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:

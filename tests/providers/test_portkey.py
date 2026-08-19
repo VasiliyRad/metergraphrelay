@@ -798,3 +798,48 @@ def test_main_sync_portkey_zero_converted_summary_reports_all_counts(
     assert "pushed 0" in captured.out
     assert "0 failed" in captured.out
     mock_push.assert_not_called()
+
+
+class _StopConvert(Exception):
+    """Sentinel raised from on_progress to prove convert does not swallow it."""
+
+
+def test_convert_portkey_export_invokes_on_progress_per_processed_row(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    good_1 = _responses_row(id="row-1", trace_id="trace-1")
+    good_2 = _chat_completion_row(id="row-2", trace_id="trace-2")
+    # A good row, a malformed line, another good row -> three processed lines.
+    input_path.write_text(
+        json.dumps(good_1) + "\n" + "not-json\n" + json.dumps(good_2) + "\n"
+    )
+    output_path = tmp_path / "converted.jsonl"
+    ticks = []
+
+    converted, skipped = convert_portkey_export(
+        str(input_path), str(output_path), on_progress=lambda: ticks.append(1)
+    )
+
+    assert (converted, skipped) == (2, 1)
+    assert len(ticks) == 3  # fires once per non-blank line, converted or skipped
+
+
+def test_convert_portkey_export_without_on_progress_is_unchanged(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+
+    assert (converted, skipped) == (1, 0)  # default None on_progress: unchanged
+
+
+def test_convert_portkey_export_propagates_on_progress_exception(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    def _boom():
+        raise _StopConvert()
+
+    with pytest.raises(_StopConvert):
+        convert_portkey_export(str(input_path), str(output_path), on_progress=_boom)

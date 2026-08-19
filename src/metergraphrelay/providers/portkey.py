@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .. import __version__
 
@@ -192,7 +192,16 @@ def convert_portkey_export(
     output_path: str,
     *,
     import_context: ImportContext | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
+    """Normalize a Portkey export JSONL to MeterGraph rows, returning (converted, skipped).
+
+    ``on_progress``, if given, is invoked once per processed (non-blank) line —
+    converted or skipped — so a caller can renew a lease during a long
+    normalization. Any exception it raises propagates (a lost lease must abort the
+    conversion). It defaults to ``None`` so manual mode and existing callers are
+    unchanged.
+    """
     converted = 0
     skipped = 0
     with open(input_path) as src, open(output_path, "w") as dst:
@@ -200,6 +209,8 @@ def convert_portkey_export(
             line = line.strip()
             if not line:
                 continue
+            if on_progress is not None:
+                on_progress()
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:

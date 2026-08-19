@@ -2,6 +2,8 @@ import json
 import urllib.error
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from metergraphrelay.push import DEFAULT_INGEST_URL, push_file
 
 
@@ -106,3 +108,57 @@ def test_push_file_counts_url_error_and_continues(tmp_path, capsys):
     assert failed == 1
     captured = capsys.readouterr()
     assert "connection refused" in captured.err
+
+
+class _StopProgress(Exception):
+    """A sentinel exception raised from on_progress to prove it is not swallowed."""
+
+
+def _raise_stop():
+    raise _StopProgress()
+
+
+def test_push_file_invokes_on_progress_once_per_processed_row(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    file_path.write_text('{"a": 1}\n{"a": 2}\n{"a": 3}\n')
+    ticks = []
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        push_file(str(file_path), token="tok-123", on_progress=lambda: ticks.append(1))
+
+    assert len(ticks) == 3  # one progress tick per row uploaded
+
+
+def test_push_file_on_progress_fires_for_failed_and_malformed_rows_too(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    # A malformed line, a blank line, and a row whose request fails.
+    file_path.write_text('not-json\n\n{"a": 1}\n')
+    ticks = []
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(500)  # non-202 -> counted failed
+        push_file(str(file_path), token="tok-123", on_progress=lambda: ticks.append(1))
+
+    assert len(ticks) == 2  # both non-blank lines processed; blank line skipped
+
+
+def test_push_file_without_on_progress_is_unchanged(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    file_path.write_text('{"a": 1}\n{"a": 2}\n')
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        result = push_file(str(file_path), token="tok-123")
+
+    assert result == (2, 0)  # default None on_progress: behavior identical to before
+
+
+def test_push_file_propagates_on_progress_exception(tmp_path):
+    file_path = tmp_path / "traces.jsonl"
+    file_path.write_text('{"a": 1}\n')
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202)
+        with pytest.raises(_StopProgress):
+            push_file(str(file_path), token="tok-123", on_progress=_raise_stop)
