@@ -9,6 +9,7 @@ prove renewals happen well within the lease duration without flooding.
 """
 
 import json
+import os
 
 import pytest
 
@@ -469,6 +470,39 @@ def test_planning_valueerror_from_bad_window_bounds_is_handled_failure():
     assert mg.abandoned == ["lease-1"]          # handled failure releases the lease
     assert "exp-1" in pk.cancelled              # unstarted hourly draft best-effort cancelled
     assert pk.started == []                      # nothing was ever started
+
+
+def test_split_does_not_accumulate_staging_files_across_subwindows(tmp_path):
+    # With a 10-way split, raw and converted files must not pile up: each raw file
+    # is deleted right after normalization and each converted file right after its
+    # push. At the moment any sub-window is pushed, staging should hold only that
+    # one converted file — never earlier raw/converted files.
+    full = (WINDOW_START, WINDOW_END)
+    pk = FakePortkey({}, totals={full: VOLUME_SPLIT_THRESHOLD + 1})
+    original_create = pk.create_export
+
+    def seeding_create(*, window_start, window_end):
+        pk._rows.setdefault((window_start, window_end), [_portkey_row(f"r-{window_start}")])
+        return original_create(window_start=window_start, window_end=window_end)
+
+    pk.create_export = seeding_create
+    mg = FakeMeterGraph(_acquired())
+
+    snapshots = []  # staging dir contents captured at each push
+
+    def snapshotting_push(path, token, base_url=None, *, on_progress=None):
+        snapshots.append(sorted(os.listdir(os.path.dirname(path))))
+        rows = [json.loads(line) for line in open(path).read().splitlines() if line.strip()]
+        return (len(rows), 0)
+
+    outcome = _run(mg, pk, [], push=snapshotting_push, work_dir=str(tmp_path))
+
+    assert outcome.status == "completed"
+    assert len(snapshots) == 10                      # one push per sub-window
+    for i, contents in enumerate(snapshots):
+        # Only the converted file currently being pushed is present: no leftover raw
+        # files (deleted after normalize) and no earlier converted files.
+        assert contents == [f"converted-{i}.jsonl"], contents
 
 
 # -- failure handling ------------------------------------------------------

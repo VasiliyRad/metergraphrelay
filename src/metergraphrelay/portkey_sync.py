@@ -175,12 +175,14 @@ def run_portkey_sync(
                 _, sk = convert_portkey_export(
                     raw, converted_path, import_context=ctx, on_progress=renewer.tick
                 )
+                _discard_file(raw)  # raw fully consumed — free it before the upload
                 skipped += sk
                 renewer.force()  # normalize done — force before the row-by-row upload
                 s, f = push(
                     converted_path, push_token, base_url=ingest_base_url,
                     on_progress=renewer.tick,
                 )
+                _discard_file(converted_path)  # pushed — free it before the next sub-window
                 pushed += s
                 failed += f
             if failed:
@@ -298,6 +300,20 @@ def _best_effort_cancel(pk_client, export_ids) -> None:
             pk_client.cancel_export(export_id)
         except (PortkeyExportError, OSError):
             pass
+
+
+def _discard_file(path: str) -> None:
+    """Best-effort delete of a consumed staging file so per-sub-window data never piles up.
+
+    Deletion is eager (right after a file is consumed) to bound peak disk to a single
+    sub-window's raw + converted footprint. Any error is swallowed: the enclosing
+    ``TemporaryDirectory`` removes whatever remains at the end of the run, so a failed
+    early delete must never turn an otherwise-successful sync into a failure.
+    """
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _safe_abandon(mg_client, lease_id: str) -> None:
