@@ -937,3 +937,15 @@ def test_sync_portkey_help_documents_api_mode(capsys):
         "PORTKEY_API_KEY", "workspace",
     ]:
         assert expected in help_text, f"missing {expected!r} in --help output"
+
+
+def test_readme_portkey_cron_example_parses():
+    readme = (Path(__file__).parent.parent / "README.md").read_text()
+    assert (
+        "metergraphrelay sync portkey --source-scope ws-acme "
+        "--initial-since 2026-08-01T00:00:00+00:00"
+    ) in readme
+    build_parser().parse_args(
+        ["sync", "portkey", "--source-scope", "ws-acme",
+         "--initial-since", "2026-08-01T00:00:00+00:00"]
+    )
