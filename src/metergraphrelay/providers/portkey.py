@@ -133,10 +133,16 @@ def _canonical_timestamp(raw: Any) -> str:
         if numeric is None:
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise PortkeyConversionError(
-                    f"created_at is not a valid timestamp: {raw!r}"
-                ) from exc
+            except ValueError:
+                try:
+                    parsed = datetime.strptime(
+                        value,
+                        "%a %b %d %Y %H:%M:%S GMT%z (Coordinated Universal Time)",
+                    )
+                except ValueError as exc:
+                    raise PortkeyConversionError(
+                        f"created_at is not a valid timestamp: {raw!r}"
+                    ) from exc
             if parsed.tzinfo is None or parsed.utcoffset() is None:
                 raise PortkeyConversionError(
                     "created_at must include a timezone offset"
