@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from .. import __version__
+
+
+@dataclass(frozen=True)
+class ImportContext:
+    source: str
+    source_scope: str
 
 
 def _tool_call_name(call: Any) -> str | None:
@@ -76,7 +83,9 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
     return json.dumps(response), None
 
 
-def normalize_portkey_row(row: dict) -> dict:
+def normalize_portkey_row(
+    row: dict, *, import_context: ImportContext | None = None
+) -> dict:
     ts = row["created_at"]
     request_id = row["id"]
     trace_id = row["trace_id"]
@@ -109,7 +118,7 @@ def normalize_portkey_row(row: dict) -> dict:
     cost = row.get("cost")
     cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
 
-    return {
+    result = {
         "ts": ts,
         "provider": row.get("ai_org"),
         "model": row.get("ai_model"),
@@ -133,9 +142,19 @@ def normalize_portkey_row(row: dict) -> dict:
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    if import_context is not None:
+        result["import_source"] = import_context.source
+        result["import_source_scope"] = import_context.source_scope
+        result["import_event_id"] = request_id  # request_id is already row["id"]
+    return result
 
 
-def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]:
+def convert_portkey_export(
+    input_path: str,
+    output_path: str,
+    *,
+    import_context: ImportContext | None = None,
+) -> tuple[int, int]:
     converted = 0
     skipped = 0
     with open(input_path) as src, open(output_path, "w") as dst:
@@ -153,7 +172,7 @@ def convert_portkey_export(input_path: str, output_path: str) -> tuple[int, int]
                 )
                 continue
             try:
-                normalized = normalize_portkey_row(row)
+                normalized = normalize_portkey_row(row, import_context=import_context)
                 serialized = json.dumps(normalized)
             except (KeyError, TypeError, AttributeError) as exc:
                 skipped += 1

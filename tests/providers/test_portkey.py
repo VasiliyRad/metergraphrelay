@@ -7,6 +7,7 @@ import pytest
 from metergraphrelay import __version__
 from metergraphrelay.cli import build_parser, main
 from metergraphrelay.providers.portkey import (
+    ImportContext,
     convert_portkey_export,
     normalize_portkey_row,
 )
@@ -631,6 +632,56 @@ def test_main_sync_portkey_returns_clean_error_when_output_directory_missing(
     captured = capsys.readouterr()
     assert captured.err.startswith("Error: ")
     assert "Traceback" not in captured.err
+
+
+def test_normalize_portkey_row_without_import_context_omits_import_fields():
+    result = normalize_portkey_row(_responses_row())
+    assert "import_source" not in result
+    assert "import_source_scope" not in result
+    assert "import_event_id" not in result
+
+
+def test_normalize_portkey_row_with_import_context_adds_dedup_fields():
+    ctx = ImportContext(source="portkey", source_scope="ws-acme")
+    result = normalize_portkey_row(_responses_row(id="pk-req-1"), import_context=ctx)
+    assert result["import_source"] == "portkey"
+    assert result["import_source_scope"] == "ws-acme"
+    assert result["import_event_id"] == "pk-req-1"
+    # import_event_id is the stable Portkey request id, same value as request_id.
+    assert result["import_event_id"] == result["request_id"]
+
+
+def test_convert_portkey_export_threads_import_context_into_every_row(tmp_path):
+    ctx = ImportContext(source="portkey", source_scope="ws-acme")
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(
+        json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n"
+        + json.dumps(_chat_completion_row(id="row-2", trace_id="t-2")) + "\n"
+    )
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(
+        str(input_path), str(output_path), import_context=ctx
+    )
+
+    assert (converted, skipped) == (2, 0)
+    rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+    assert [r["import_event_id"] for r in rows] == ["row-1", "row-2"]
+    assert all(r["import_source"] == "portkey" for r in rows)
+    assert all(r["import_source_scope"] == "ws-acme" for r in rows)
+
+
+def test_convert_portkey_export_without_context_keeps_rows_free_of_import_fields(
+    tmp_path,
+):
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    convert_portkey_export(str(input_path), str(output_path))
+
+    row = json.loads(output_path.read_text().splitlines()[0])
+    assert "import_source" not in row
 
 
 def test_main_sync_portkey_zero_converted_summary_reports_all_counts(
