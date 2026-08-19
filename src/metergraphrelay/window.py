@@ -13,8 +13,20 @@ class TimeWindow:
     end: str    # aware ISO 8601
 
 
+def normalize_utc_designator(value: str) -> str:
+    """Return ``value`` with a trailing ``Z``/``z`` UTC designator rewritten as ``+00:00``.
+
+    Python 3.10's :func:`datetime.fromisoformat` rejects the ``Z`` suffix that 3.11+
+    accepts; normalizing here keeps aware-timestamp parsing identical across versions.
+    A value already carrying an explicit offset is returned unchanged.
+    """
+    if value.endswith(("Z", "z")):
+        return f"{value[:-1]}+00:00"
+    return value
+
+
 def _parse_aware(value: str) -> datetime:
-    dt = datetime.fromisoformat(value)
+    dt = datetime.fromisoformat(normalize_utc_designator(value))
     if dt.tzinfo is None:
         raise ValueError(f"timestamp must be timezone-aware, got naive value: {value!r}")
     return dt

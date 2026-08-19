@@ -407,6 +407,33 @@ def test_subwindow_still_over_threshold_is_rejected_without_recursion():
     assert str(VOLUME_SPLIT_THRESHOLD) in outcome.detail or "recursiv" in outcome.detail.lower()
 
 
+def test_planning_valueerror_from_bad_window_bounds_is_handled_failure():
+    # The server hands out reversed window bounds and an oversized draft, so the
+    # split planner calls split_window with end <= start and it raises ValueError.
+    # That must surface as a handled sync failure (best-effort cancel + abandon +
+    # exit 1), never an unhandled traceback that leaks the lease.
+    reversed_lease = AcquireResult(
+        status="acquired",
+        lease=AcquiredLease(
+            lease_id="lease-1", checkpoint_version=1,
+            window_start=WINDOW_END, window_end=WINDOW_START,  # reversed -> ValueError
+            lease_expires_at="2026-08-19T00:15:00+00:00",
+        ),
+    )
+    full = (WINDOW_END, WINDOW_START)
+    pk = FakePortkey({}, totals={full: VOLUME_SPLIT_THRESHOLD + 1})
+    mg = FakeMeterGraph(reversed_lease)
+
+    outcome = _run(mg, pk, [])
+
+    assert outcome.status == "failed"
+    assert outcome.exit_code == 1
+    assert mg.completed == []
+    assert mg.abandoned == ["lease-1"]          # handled failure releases the lease
+    assert "exp-1" in pk.cancelled              # unstarted hourly draft best-effort cancelled
+    assert pk.started == []                      # nothing was ever started
+
+
 # -- failure handling ------------------------------------------------------
 
 

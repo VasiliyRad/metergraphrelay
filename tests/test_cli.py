@@ -814,6 +814,27 @@ def test_sync_portkey_api_rejects_naive_initial_since(tmp_path, capsys):
     assert "aware" in err.lower() or "timezone" in err.lower()
 
 
+def test_sync_portkey_api_accepts_z_suffixed_initial_since(tmp_path):
+    # A trailing 'Z' (UTC) is an aware timestamp; it must be accepted (and forwarded)
+    # rather than rejected, including on Python 3.10 where fromisoformat rejects 'Z'.
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("caught_up", "caught up", 0),
+    ) as run:
+        exit_code = main(
+            [
+                "sync", "portkey", "--source-scope", "ws-acme",
+                "--initial-since", "2026-08-01T00:00:00Z", "--env-file", str(env_file),
+            ]
+        )
+
+    assert exit_code == 0
+    assert run.call_args.kwargs["initial_since"] == "2026-08-01T00:00:00Z"
+
+
 def test_sync_portkey_api_rejects_max_window_over_3600(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")

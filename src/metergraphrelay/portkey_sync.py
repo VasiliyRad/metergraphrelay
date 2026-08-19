@@ -233,8 +233,21 @@ def _plan_exports(pk_client, lease, created_export_ids: list[str], renewer) -> l
     pk_client.cancel_export(hourly.export_id)
     created_export_ids.remove(hourly.export_id)
     renewer.tick()
+    # split_window validates the server-provided bounds (aware, end-after-start). A
+    # bad/reversed/naive window raises ValueError; wrap it as PortkeyExportError right
+    # at the planning boundary so it flows through normal handled-failure cleanup
+    # (best-effort cancel + abandon + exit 1) instead of leaking as a traceback — and
+    # without globally swallowing unrelated ValueErrors elsewhere in the run.
+    try:
+        sub_windows = split_window(
+            TimeWindow(start=lease.window_start, end=lease.window_end)
+        )
+    except ValueError as exc:
+        raise PortkeyExportError(
+            f"cannot split window {lease.window_start}..{lease.window_end}: {exc}"
+        ) from exc
     export_ids: list[str] = []
-    for w in split_window(TimeWindow(start=lease.window_start, end=lease.window_end)):
+    for w in sub_windows:
         draft = pk_client.create_export(window_start=w.start, window_end=w.end)
         created_export_ids.append(draft.export_id)
         renewer.tick()

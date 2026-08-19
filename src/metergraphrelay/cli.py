@@ -18,6 +18,7 @@ from .providers.openai import pull_openai
 from .providers.portkey import convert_portkey_export
 from .providers.portkey_export import PortkeyExportClient, PortkeyExportError
 from .push import DEFAULT_INGEST_URL, push_file
+from .window import normalize_utc_designator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -389,7 +390,7 @@ def _validate_initial_since(value: str) -> None:
     # at all (only on first-run state), so we validate the format when given but
     # never require it here. Not a secret, so echoing the bad value is safe.
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(normalize_utc_designator(value))
     except ValueError as exc:
         raise ConfigError(
             f"--initial-since must be an ISO 8601 timestamp, got {value!r}: {exc}"
