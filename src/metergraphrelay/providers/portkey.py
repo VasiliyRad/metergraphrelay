@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .. import __version__
@@ -95,6 +96,33 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
 
 IMPORT_EVENT_ID_MAX_LENGTH = 512
 
+_NUMERIC_TIMESTAMP_RE = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z"
+)
+_RFC3339_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ].+\Z")
+_PORTKEY_DATE_RE = re.compile(
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+    r"(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+    r"(?P<day>\d{2}) (?P<year>\d{4}) "
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}) "
+    r"GMT(?P<offset_sign>[+-])(?P<offset_hour>\d{2})(?P<offset_minute>\d{2}) "
+    r"\([^)]+\)\Z"
+)
+_MONTHS = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
+
 
 def _canonical_import_event_id(raw: Any) -> str:
     """Validate a Portkey row id for use as ``import_event_id``.
@@ -121,49 +149,85 @@ def _canonical_import_event_id(raw: Any) -> str:
 
 def _canonical_timestamp(raw: Any) -> str:
     """Return a provider timestamp as RFC 3339 UTC or fail the import window."""
-    value = raw
-    if isinstance(value, str):
-        value = value.strip()
+    if isinstance(raw, bool) or raw is None:
+        raise PortkeyConversionError("created_at must be a timestamp")
+
+    if isinstance(raw, str):
+        value = raw.strip()
         if not value:
             raise PortkeyConversionError("created_at must be a timestamp")
-        try:
+
+        if _NUMERIC_TIMESTAMP_RE.fullmatch(value):
             numeric = float(value)
-        except ValueError:
-            numeric = None
-        if numeric is None:
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError as exc:
+            parsed = _timestamp_from_epoch(numeric, raw)
+        elif _RFC3339_TIMESTAMP_RE.fullmatch(value):
+            parsed = _timestamp_from_rfc3339(value, raw)
+        else:
+            match = _PORTKEY_DATE_RE.fullmatch(value)
+            if match is None:
                 raise PortkeyConversionError(
                     f"created_at is not a valid timestamp: {raw!r}"
-                ) from exc
-            if parsed.tzinfo is None or parsed.utcoffset() is None:
-                raise PortkeyConversionError(
-                    "created_at must include a timezone offset"
                 )
-        else:
-            value = numeric
-
-    if isinstance(value, bool) or value is None:
-        raise PortkeyConversionError("created_at must be a timestamp")
-    if isinstance(value, (int, float)):
-        numeric = float(value)
-        if not math.isfinite(numeric):
-            raise PortkeyConversionError("created_at must be a finite timestamp")
-        if abs(numeric) >= 100_000_000_000:
-            numeric /= 1000
-        try:
-            parsed = datetime.fromtimestamp(numeric, tz=timezone.utc)
-        except (OverflowError, OSError, ValueError) as exc:
-            raise PortkeyConversionError(
-                f"created_at is outside the supported range: {raw!r}"
-            ) from exc
-    elif not isinstance(value, str):
+            parsed = _timestamp_from_portkey_date(match, raw)
+    elif isinstance(raw, (int, float)):
+        parsed = _timestamp_from_epoch(float(raw), raw)
+    else:
         raise PortkeyConversionError(
             f"created_at must be a timestamp, got {type(raw).__name__}"
         )
 
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _timestamp_from_rfc3339(value: str, raw: Any) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PortkeyConversionError(
+            f"created_at is not a valid timestamp: {raw!r}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PortkeyConversionError("created_at must include a timezone offset")
+    return parsed
+
+
+def _timestamp_from_portkey_date(match: re.Match[str], raw: Any) -> datetime:
+    offset_hour = int(match["offset_hour"])
+    offset_minute = int(match["offset_minute"])
+    if offset_hour > 23 or offset_minute > 59:
+        raise PortkeyConversionError(
+            f"created_at is not a valid timestamp: {raw!r}"
+        )
+    offset = timedelta(hours=offset_hour, minutes=offset_minute)
+    if match["offset_sign"] == "-":
+        offset = -offset
+    try:
+        return datetime(
+            int(match["year"]),
+            _MONTHS[match["month"]],
+            int(match["day"]),
+            int(match["hour"]),
+            int(match["minute"]),
+            int(match["second"]),
+            tzinfo=timezone(offset),
+        )
+    except ValueError as exc:
+        raise PortkeyConversionError(
+            f"created_at is not a valid timestamp: {raw!r}"
+        ) from exc
+
+
+def _timestamp_from_epoch(numeric: float, raw: Any) -> datetime:
+    if not math.isfinite(numeric):
+        raise PortkeyConversionError("created_at must be a finite timestamp")
+    if abs(numeric) >= 100_000_000_000:
+        numeric /= 1000
+    try:
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise PortkeyConversionError(
+            f"created_at is outside the supported range: {raw!r}"
+        ) from exc
 
 
 def normalize_portkey_row(

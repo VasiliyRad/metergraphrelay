@@ -178,6 +178,14 @@ def test_normalize_portkey_row_maps_verified_fields():
     [
         ("2026-08-10T05:00:00-07:00", "2026-08-10T12:00:00Z"),
         ("2026-08-10T12:00:00.123456Z", "2026-08-10T12:00:00.123456Z"),
+        (
+            "Sat Aug 08 2026 07:30:00 GMT+0000 (Coordinated Universal Time)",
+            "2026-08-08T07:30:00Z",
+        ),
+        (
+            "Fri Aug 07 2026 23:30:00 GMT-0800 (Pacific Standard Time)",
+            "2026-08-08T07:30:00Z",
+        ),
         (1786363200, "2026-08-10T12:00:00Z"),
         (1786363200000, "2026-08-10T12:00:00Z"),
         ("1786363200000", "2026-08-10T12:00:00Z"),
@@ -193,7 +201,14 @@ def test_normalize_portkey_row_canonicalizes_timestamp_to_rfc3339_utc(
 
 @pytest.mark.parametrize(
     "created_at",
-    [None, "", "not-a-timestamp", "2026-08-10T12:00:00", True],
+    [
+        None,
+        "",
+        "not-a-timestamp",
+        "2026-08-10T12:00:00",
+        "Sat Aug 08 2026 07:30:00 GMT+2460 (Invalid Zone)",
+        True,
+    ],
 )
 def test_normalize_portkey_row_rejects_invalid_timestamp(created_at):
     with pytest.raises(PortkeyConversionError, match="created_at"):
