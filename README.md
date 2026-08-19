@@ -202,6 +202,10 @@ temporary one that's deleted after upload:
 `--output` is retained even if the upload fails, so you can retry with
 `metergraphrelay push converted.jsonl`.
 
+The relay converts Portkey's `created_at` value to RFC 3339 UTC before
+uploading it. A missing, invalid, or timezone-ambiguous timestamp fails the
+conversion instead of silently assigning the trace to the import date.
+
 **Before running this against your own export:** request and response
 content from the export is uploaded to MeterGraph, with no opt-out.
 

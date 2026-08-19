@@ -540,6 +540,23 @@ def test_conversion_failure_abandons_lease_and_exits_nonzero():
     assert "exp-1" in pk.cancelled            # best-effort cancel of the created export
 
 
+def test_invalid_provider_timestamp_fails_window_before_upload():
+    row = _portkey_row("r1")
+    row["created_at"] = "not-a-timestamp"
+    pk = FakePortkey({(WINDOW_START, WINDOW_END): [row]})
+    mg = FakeMeterGraph(_acquired())
+    pushes = []
+
+    outcome = _run(mg, pk, pushes)
+
+    assert outcome.status == "failed"
+    assert outcome.exit_code == 1
+    assert "created_at" in outcome.detail
+    assert pushes == []
+    assert mg.completed == []
+    assert mg.abandoned == ["lease-1"]
+
+
 def test_portkey_error_best_effort_cancels_and_abandons_lease():
     mg = FakeMeterGraph(_acquired())
 

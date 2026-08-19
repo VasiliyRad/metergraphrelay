@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .. import __version__
@@ -15,10 +17,11 @@ class ImportContext:
 
 
 class PortkeyConversionError(ValueError):
-    """Raised when a row cannot be converted for import (e.g. an unusable
-    ``import_event_id``). Subclasses ValueError so it is never swallowed by the
-    per-row ``KeyError``/``TypeError``/``AttributeError`` skip path — an invalid
-    imported id must fail the whole window, not silently drop a record."""
+    """Raised when a row cannot be converted without losing its identity.
+
+    Subclasses ValueError so it is never swallowed by the per-row malformed-data
+    skip path: invalid event ids and timestamps must fail the whole window.
+    """
 
 
 def _tool_call_name(call: Any) -> str | None:
@@ -116,6 +119,53 @@ def _canonical_import_event_id(raw: Any) -> str:
     return canonical
 
 
+def _canonical_timestamp(raw: Any) -> str:
+    """Return a provider timestamp as RFC 3339 UTC or fail the import window."""
+    value = raw
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            raise PortkeyConversionError("created_at must be a timestamp")
+        try:
+            numeric = float(value)
+        except ValueError:
+            numeric = None
+        if numeric is None:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise PortkeyConversionError(
+                    f"created_at is not a valid timestamp: {raw!r}"
+                ) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise PortkeyConversionError(
+                    "created_at must include a timezone offset"
+                )
+        else:
+            value = numeric
+
+    if isinstance(value, bool) or value is None:
+        raise PortkeyConversionError("created_at must be a timestamp")
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise PortkeyConversionError("created_at must be a finite timestamp")
+        if abs(numeric) >= 100_000_000_000:
+            numeric /= 1000
+        try:
+            parsed = datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise PortkeyConversionError(
+                f"created_at is outside the supported range: {raw!r}"
+            ) from exc
+    elif not isinstance(value, str):
+        raise PortkeyConversionError(
+            f"created_at must be a timestamp, got {type(raw).__name__}"
+        )
+
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def normalize_portkey_row(
     row: dict, *, import_context: ImportContext | None = None
 ) -> dict:
@@ -124,7 +174,7 @@ def normalize_portkey_row(
         # Validate the imported id before anything else so a bad id fails the
         # window cleanly (row.get avoids a KeyError being swallowed as a skip).
         import_event_id = _canonical_import_event_id(row.get("id"))
-    ts = row["created_at"]
+    ts = _canonical_timestamp(row.get("created_at"))
     request_id = row["id"]
     trace_id = row["trace_id"]
 
