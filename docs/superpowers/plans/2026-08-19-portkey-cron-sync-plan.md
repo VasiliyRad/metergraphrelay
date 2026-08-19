@@ -7,7 +7,7 @@
 **Architecture:** New leaf modules composed bottom-up, each independently testable:
 - `window.py` — pure window planning (`split_window`, the >50k volume split into 10 overlapping intervals).
 - `metergraph_sync.py` — `MeterGraphSyncClient`, a stdlib-urllib client for the fully-specified `/v1/import-sync` contract (acquire/renew/complete/abandon/state).
-- `providers/portkey_export.py` — `PortkeyExportClient`, a stdlib-urllib client for Portkey's async Logs Export API (submit/poll/download). **This is the only module whose wire format is not verifiable from inside this repo; it is quarantined here behind a typed interface and named constants (see the ASSUMPTION callout in Task 4).**
+- `providers/portkey_export.py` — `PortkeyExportClient`, a stdlib-urllib client for Portkey's **beta Logs Export API** (create-draft → start → poll → download-via-signed-URL → cancel). The wire contract is **verified against the official docs** (`/api-reference/admin-api/data-plane/logs/log-exports-beta/`); see Task 4 for the exact endpoints, request bodies, and response fields.
 - `providers/portkey.py` — existing normalization, extended backward-compatibly with an optional `ImportContext` so API-mode rows carry `import_source`/`import_source_scope`/`import_event_id` for server-side dedup.
 - `portkey_sync.py` — `run_portkey_sync`, the CLI-independent orchestrator that ties acquire → submit → poll(+renew) → maybe-split → download → normalize → push → complete, releasing the lease on any handled failure.
 - `cli.py` — `export_file` positional made optional (`nargs="?"`); when omitted, dispatch to the new `_run_sync_portkey_api`.
@@ -67,8 +67,9 @@ Every task's requirements implicitly include this section.
 - **Idempotency fields.** API-mode rows add exactly `import_source="portkey"`, `import_source_scope=<source_scope>`, `import_event_id=<Portkey row id>`. `import_event_id` reuses the Portkey request `id` (same value already mapped to `request_id`/`span_id`) so re-runs and overlap regions dedupe server-side.
 - **Exit codes.** `completed`, `caught_up`, `busy` → exit 0 (all clean). Any handled failure → exit 1 after releasing the lease (`DELETE`), except lease-lost during renew/complete (lease already gone → exit 1 without an abandon call). Process crash → no cleanup, server lease expiry handles it.
 - **`complete` fires only after every push in the run reported zero failed rows.**
-- **Volume split is one-shot, never recursive:** threshold `> 50_000` on a completed full-window export triggers exactly one split into 10 sub-windows with 1-second boundary overlaps; those ten become the download set (the oversized full-window export is discarded, not downloaded).
-- **Base URL reuse:** the MeterGraph import-sync client and `push_file` target the same server; base URL resolves from `METERGRAPH_INGEST_URL` (falling back to `push.DEFAULT_INGEST_URL`), a single source of truth. Portkey base URL resolves from `PORTKEY_BASE_URL` (falling back to `portkey_export.DEFAULT_PORTKEY_URL`).
+- **Volume split is one-shot, never recursive, decided from the draft's `total`:** creating a Portkey export draft returns its record `total` **before it is started**. If `total <= 50_000`, start/poll/download that hourly draft. If `total > 50_000`, **cancel the unstarted hourly draft**, create exactly 10 overlapping sub-window drafts, and if **any** sub-window draft still reports `total > 50_000`, **reject with a clear error (no recursive split)**; otherwise start and poll all ten together. One-second boundary overlaps plus server import-event dedup absorb boundary duplicates.
+- **Best-effort Portkey cleanup on failure:** on any handled failure, cancel every export draft/job this run created that may still be non-terminal, best-effort (swallow cancel errors) — **without masking the primary error**, which still determines the exit.
+- **Base URL reuse:** the MeterGraph import-sync client and `push_file` target the same server; base URL resolves from `METERGRAPH_INGEST_URL` (falling back to `push.DEFAULT_INGEST_URL`), a single source of truth. Portkey base URL resolves from `PORTKEY_BASE_URL` (falling back to `portkey_export.DEFAULT_PORTKEY_URL`, which is the docs-verified public base `https://api.portkey.ai/v1`; self-hosted bases are supported by overriding it). The Portkey **download signed URL is fetched without the `x-portkey-api-key` header** (it is pre-signed).
 - **Test env isolation:** any new env var the CLI reads must be added to `tests/conftest.py`'s `ENV_VARS_READ_BY_CLI` set (credentials via `CREDENTIAL_SPECS` are auto-included; non-credential vars `PORTKEY_WORKSPACE`/`PORTKEY_BASE_URL` are added explicitly, exactly as `LANGFUSE_BASE_URL`/`METERGRAPH_INGEST_URL` already are).
 - **Synthetic test data only.** No customer content in tests, fixtures, warnings, or committed files.
 
@@ -691,9 +692,17 @@ git commit -m "feat(sync): add MeterGraph import-sync client (acquire/renew/comp
 
 ---
 
-### Task 4: Portkey async export client (`providers/portkey_export.py`)
+### Task 4: Portkey beta Logs Export client (`providers/portkey_export.py`)
 
-> **ASSUMPTION — VERIFY BEFORE IMPLEMENTING WIRE FORMAT.** Portkey's Logs Export HTTP endpoints, request bodies, and response field names are **not verifiable from inside this repo**. This module is the single quarantine boundary for that risk: the *interface* (`PortkeyExportClient` + `PortkeyExportJob`) is what the orchestrator and its tests depend on, and it is stable. The concrete request paths, request-body keys, and response-field names live in the named constants at the top of the file (`SUBMIT_PATH`, `JOB_PATH_TEMPLATE`, `_STATUS_FIELD`, `_STATUS_MAP`, `_RECORD_COUNT_FIELD`, `_DOWNLOAD_FIELD`). Before writing production HTTP, confirm these against Portkey's Logs Export API docs and adjust **only** these constants and the localized tests in this task — no other module changes. The tests below pin the *shapes the code expects*; if the real API differs, update the fixtures and constants together.
+**Verified wire contract** (official docs, `/api-reference/admin-api/data-plane/logs/log-exports-beta/`; no speculation — implement exactly this):
+
+- Base public URL `https://api.portkey.ai/v1` (self-hosted base supported via override). Auth header `x-portkey-api-key: <PORTKEY_API_KEY>`.
+- `POST /logs/exports` — **create a draft**. JSON body: required `filters` and `requested_data`, optional `workspace_id`. `filters` uses aware ISO `time_of_generation_min` / `time_of_generation_max`, plus `page_size` (max & default `50000`) and `current_page`. Response `200` → `{ "id": "<uuid>", "total": <int>, "object": "export" }`. **`total` is known here, before the export is started** — this is what the volume-split decision reads.
+- `requested_data` is a list from the enum: `id, trace_id, created_at, request, response, is_success, ai_org, ai_model, req_units, res_units, total_units, request_url, cost, cost_currency, response_time, response_status_code, mode, config, prompt_slug, metadata`. This task requests exactly the fields `normalize_portkey_row` consumes.
+- `POST /logs/exports/{id}/start` — response `200` (message/object).
+- `GET /logs/exports/{id}` — response `ExportItem` with `status` enum `draft | in_progress | success | failed | stopped`.
+- `GET /logs/exports/{id}/download` — response `200` → `{ "signed_url": "<url>" }`; then GET the signed URL **without** the Portkey credential header.
+- `POST /logs/exports/{id}/cancel` — response `200` (message/object).
 
 **Files:**
 - Create: `src/metergraphrelay/providers/portkey_export.py`
@@ -705,29 +714,33 @@ git commit -m "feat(sync): add MeterGraph import-sync client (acquire/renew/comp
 ```python
 class PortkeyExportError(Exception): ...
 
-STATUS_COMPLETED: str = "completed"
+STATUS_DRAFT: str = "draft"
+STATUS_IN_PROGRESS: str = "in_progress"
+STATUS_SUCCESS: str = "success"
 STATUS_FAILED: str = "failed"
+STATUS_STOPPED: str = "stopped"
 
 @dataclass(frozen=True)
-class PortkeyExportJob:
-    job_id: str
-    status: str                 # normalized: "pending" | "running" | "completed" | "failed"
-    record_count: int | None    # populated when completed
-    download_token: str | None  # opaque handle passed back to download_to
+class PortkeyExport:
+    export_id: str
+    total: int | None   # record count from the create response; None on get/status responses
+    status: str         # one of the five enum values above
 
     @property
-    def is_terminal(self) -> bool: ...        # status in {"completed", "failed"}
+    def is_terminal(self) -> bool: ...   # status in {"success", "failed", "stopped"}
     @property
-    def is_success(self) -> bool: ...         # status == "completed"
+    def is_success(self) -> bool: ...    # status == "success"
 
 class PortkeyExportClient:
-    def __init__(self, api_key: str, *, workspace: str,
+    def __init__(self, api_key: str, *, workspace: str | None = None,
                  base_url: str = DEFAULT_PORTKEY_URL, timeout: float = 30.0): ...
-    def submit_export(self, *, window_start: str, window_end: str) -> PortkeyExportJob: ...
-    def get_job(self, job_id: str) -> PortkeyExportJob: ...
-    def download_to(self, job: PortkeyExportJob, dest_path: str) -> int: ...  # returns rows written
+    def create_export(self, *, window_start: str, window_end: str) -> PortkeyExport: ...  # draft; total known
+    def start_export(self, export_id: str) -> None: ...
+    def get_export(self, export_id: str) -> PortkeyExport: ...                             # status only
+    def download_to(self, export_id: str, dest_path: str) -> int: ...                      # signed-url fetch; rows written
+    def cancel_export(self, export_id: str) -> None: ...
 ```
-`workspace` is fixed at construction (one workspace per app, MVP) and sent as `source_scope`/workspace on submit; `submit_export` takes only the window. Auth header assumption: `x-portkey-api-key: <api_key>` (a named constant — verify).
+`workspace` is fixed at construction (one workspace per app, MVP) and sent as `workspace_id` on create when set; `create_export` takes only the window. Auth header is `x-portkey-api-key: <api_key>` on every call **except** the signed-URL download, which carries no Portkey header.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -740,13 +753,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from metergraphrelay.providers.portkey_export import (
-    STATUS_COMPLETED,
+    STATUS_SUCCESS,
+    PortkeyExport,
     PortkeyExportClient,
     PortkeyExportError,
-    PortkeyExportJob,
 )
 
-BASE = "https://api.portkey.example"
+BASE = "https://api.portkey.example/v1"
+W_MIN = "2026-08-19T00:00:00+00:00"
+W_MAX = "2026-08-19T01:00:00+00:00"
 
 
 def _resp(status, body: bytes):
@@ -762,63 +777,109 @@ def _client():
     return PortkeyExportClient("pk-secret", workspace="ws-acme", base_url=BASE)
 
 
-def test_submit_export_sends_workspace_window_and_api_key_header():
-    body = json.dumps({"id": "job-1", "status": "queued"}).encode()
+def test_create_export_sends_filters_requested_data_and_api_key_header():
+    body = json.dumps({"id": "exp-1", "total": 42, "object": "export"}).encode()
     with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
         mock.return_value = _resp(200, body)
-        job = _client().submit_export(
-            window_start="2026-08-19T00:00:00+00:00", window_end="2026-08-19T01:00:00+00:00"
-        )
+        export = _client().create_export(window_start=W_MIN, window_end=W_MAX)
+
     request = mock.call_args.args[0]
+    assert request.full_url == f"{BASE}/logs/exports"
     assert request.method == "POST"
-    assert request.get_header("X-portkey-api-key") == "pk-secret"  # header name is case-normalized by urllib
+    assert request.get_header("X-portkey-api-key") == "pk-secret"  # urllib title-cases header keys
     sent = json.loads(request.data)
     assert sent["workspace_id"] == "ws-acme"
-    assert sent["start_time"] == "2026-08-19T00:00:00+00:00"
-    assert sent["end_time"] == "2026-08-19T01:00:00+00:00"
-    assert job.job_id == "job-1"
-    assert not job.is_terminal
+    assert sent["filters"]["time_of_generation_min"] == W_MIN
+    assert sent["filters"]["time_of_generation_max"] == W_MAX
+    assert sent["filters"]["page_size"] == 50000
+    assert sent["filters"]["current_page"] == 1
+    # requested_data pulls exactly the fields the normalizer consumes.
+    assert "created_at" in sent["requested_data"]
+    assert "response_status_code" in sent["requested_data"]
+    assert "metadata" in sent["requested_data"]
+    # The draft's total is known immediately, before start.
+    assert export.export_id == "exp-1"
+    assert export.total == 42
+    assert export.status == "draft"
+    assert not export.is_terminal
 
 
-def test_get_job_normalizes_completed_status_and_record_count():
-    body = json.dumps(
-        {"id": "job-1", "status": "success", "total_records": 42, "download_url": "https://dl/job-1"}
-    ).encode()
+def test_create_export_omits_workspace_id_when_not_configured():
+    body = json.dumps({"id": "exp-1", "total": 0, "object": "export"}).encode()
     with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
         mock.return_value = _resp(200, body)
-        job = _client().get_job("job-1")
-    assert job.status == STATUS_COMPLETED
-    assert job.is_terminal and job.is_success
-    assert job.record_count == 42
-    assert job.download_token == "https://dl/job-1"
+        PortkeyExportClient("pk-secret", base_url=BASE).create_export(
+            window_start=W_MIN, window_end=W_MAX
+        )
+    assert "workspace_id" not in json.loads(mock.call_args.args[0].data)
 
 
-def test_get_job_normalizes_failed_status():
-    body = json.dumps({"id": "job-1", "status": "failed"}).encode()
+def test_start_export_posts_to_start_path():
+    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(200, json.dumps({"message": "ok", "object": "export"}).encode())
+        _client().start_export("exp-1")
+    request = mock.call_args.args[0]
+    assert request.full_url == f"{BASE}/logs/exports/exp-1/start"
+    assert request.method == "POST"
+
+
+def test_get_export_reads_status_enum():
+    body = json.dumps({"id": "exp-1", "status": "in_progress", "object": "export"}).encode()
     with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
         mock.return_value = _resp(200, body)
-        job = _client().get_job("job-1")
-    assert job.is_terminal
-    assert not job.is_success
+        export = _client().get_export("exp-1")
+    request = mock.call_args.args[0]
+    assert request.full_url == f"{BASE}/logs/exports/exp-1"
+    assert request.method == "GET"
+    assert export.status == "in_progress"
+    assert not export.is_terminal
 
 
-def test_download_to_writes_jsonl_and_returns_row_count(tmp_path):
-    job = PortkeyExportJob(
-        job_id="job-1", status=STATUS_COMPLETED, record_count=2, download_token="https://dl/job-1"
-    )
+@pytest.mark.parametrize(
+    "status, terminal, success",
+    [("success", True, True), ("failed", True, False), ("stopped", True, False),
+     ("in_progress", False, False), ("draft", False, False)],
+)
+def test_export_terminal_and_success_flags(status, terminal, success):
+    export = PortkeyExport(export_id="exp-1", total=None, status=status)
+    assert export.is_terminal is terminal
+    assert export.is_success is success
+
+
+def test_download_to_resolves_signed_url_then_fetches_it_without_portkey_header(tmp_path):
+    signed = "https://storage.example/signed?token=abc"
     payload = b'{"id":"r1"}\n{"id":"r2"}\n'
     dest = tmp_path / "raw.jsonl"
     with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
-        mock.return_value = _resp(200, payload)
-        written = _client().download_to(job, str(dest))
+        mock.side_effect = [
+            _resp(200, json.dumps({"signed_url": signed}).encode()),  # GET .../download
+            _resp(200, payload),                                       # GET signed URL
+        ]
+        written = _client().download_to("exp-1", str(dest))
+
+    first, second = mock.call_args_list[0].args[0], mock.call_args_list[1].args[0]
+    assert first.full_url == f"{BASE}/logs/exports/exp-1/download"
+    assert first.get_header("X-portkey-api-key") == "pk-secret"
+    assert second.full_url == signed
+    assert second.get_header("X-portkey-api-key") is None  # pre-signed: no credential leaked
     assert written == 2
     assert dest.read_bytes() == payload
 
 
-def test_download_to_raises_when_no_download_token():
-    job = PortkeyExportJob(job_id="job-1", status=STATUS_COMPLETED, record_count=0, download_token=None)
-    with pytest.raises(PortkeyExportError, match="no download"):
-        _client().download_to(job, "/tmp/whatever.jsonl")
+def test_download_to_raises_when_signed_url_missing():
+    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(200, json.dumps({}).encode())
+        with pytest.raises(PortkeyExportError, match="signed_url"):
+            _client().download_to("exp-1", "/tmp/whatever.jsonl")
+
+
+def test_cancel_export_posts_to_cancel_path():
+    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(200, json.dumps({"message": "cancelled", "object": "export"}).encode())
+        _client().cancel_export("exp-1")
+    request = mock.call_args.args[0]
+    assert request.full_url == f"{BASE}/logs/exports/exp-1/cancel"
+    assert request.method == "POST"
 
 
 def test_http_error_raises_portkey_export_error():
@@ -827,14 +888,14 @@ def test_http_error_raises_portkey_export_error():
             url=f"{BASE}/x", code=401, msg="Unauthorized", hdrs=None, fp=None
         )
         with pytest.raises(PortkeyExportError, match="401"):
-            _client().get_job("job-1")
+            _client().get_export("exp-1")
 
 
 def test_network_error_raises_portkey_export_error():
     with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
         mock.side_effect = urllib.error.URLError("connection refused")
         with pytest.raises(PortkeyExportError, match="connection refused"):
-            _client().get_job("job-1")
+            _client().get_export("exp-1")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -852,31 +913,23 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-# --- ASSUMED Portkey Logs Export wire contract — verify against Portkey docs ---
-DEFAULT_PORTKEY_URL = "https://api.portkey.ai"
-SUBMIT_PATH = "/v1/logs/exports"
-JOB_PATH_TEMPLATE = "/v1/logs/exports/{job_id}"
+# Docs-verified Portkey beta Logs Export contract.
+DEFAULT_PORTKEY_URL = "https://api.portkey.ai/v1"
+EXPORTS_PATH = "/logs/exports"
 _API_KEY_HEADER = "x-portkey-api-key"
-_STATUS_FIELD = "status"
-_RECORD_COUNT_FIELD = "total_records"
-_DOWNLOAD_FIELD = "download_url"
-_JOB_ID_FIELD = "id"
-# Map Portkey's status vocabulary onto our normalized four-state model.
-_STATUS_MAP = {
-    "queued": "pending",
-    "pending": "pending",
-    "running": "running",
-    "in_progress": "running",
-    "success": "completed",
-    "completed": "completed",
-    "failed": "failed",
-    "error": "failed",
-}
-# --- end ASSUMED contract ---
+PAGE_SIZE_MAX = 50000
+# Exactly the fields normalize_portkey_row consumes, drawn from the requested_data enum.
+REQUESTED_DATA = [
+    "id", "trace_id", "created_at", "request", "response", "ai_org", "ai_model",
+    "req_units", "res_units", "response_time", "cost", "response_status_code", "metadata",
+]
 
-STATUS_COMPLETED = "completed"
+STATUS_DRAFT = "draft"
+STATUS_IN_PROGRESS = "in_progress"
+STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
-_TERMINAL = frozenset({STATUS_COMPLETED, STATUS_FAILED})
+STATUS_STOPPED = "stopped"
+_TERMINAL = frozenset({STATUS_SUCCESS, STATUS_FAILED, STATUS_STOPPED})
 
 
 class PortkeyExportError(Exception):
@@ -884,11 +937,10 @@ class PortkeyExportError(Exception):
 
 
 @dataclass(frozen=True)
-class PortkeyExportJob:
-    job_id: str
+class PortkeyExport:
+    export_id: str
+    total: int | None
     status: str
-    record_count: int | None
-    download_token: str | None
 
     @property
     def is_terminal(self) -> bool:
@@ -896,22 +948,26 @@ class PortkeyExportJob:
 
     @property
     def is_success(self) -> bool:
-        return self.status == STATUS_COMPLETED
+        return self.status == STATUS_SUCCESS
 
 
 class PortkeyExportClient:
-    def __init__(self, api_key: str, *, workspace: str, base_url: str = DEFAULT_PORTKEY_URL, timeout: float = 30.0):
+    def __init__(self, api_key: str, *, workspace: str | None = None,
+                 base_url: str = DEFAULT_PORTKEY_URL, timeout: float = 30.0):
         self._api_key = api_key
         self._workspace = workspace
         self._base = base_url.rstrip("/")
         self._timeout = timeout
 
-    def _request(self, method: str, path: str, *, body: dict | None = None) -> bytes:
+    def _request(self, method: str, path_or_url: str, *, body: dict | None = None, authed: bool = True) -> bytes:
+        url = path_or_url if path_or_url.startswith("http") else f"{self._base}{path_or_url}"
         data = json.dumps(body).encode() if body is not None else None
-        headers = {_API_KEY_HEADER: self._api_key}
+        headers = {}
+        if authed:
+            headers[_API_KEY_HEADER] = self._api_key
         if data is not None:
             headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(f"{self._base}{path}", data=data, headers=headers, method=method)
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 return response.read()
@@ -920,42 +976,61 @@ class PortkeyExportClient:
         except urllib.error.URLError as exc:
             raise PortkeyExportError(f"Portkey export request failed: {exc.reason}") from exc
 
-    def _job_from_payload(self, raw: bytes) -> PortkeyExportJob:
+    @staticmethod
+    def _parse(raw: bytes) -> dict:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise PortkeyExportError(f"Portkey export returned invalid JSON: {exc}") from exc
-        if not isinstance(payload, dict) or _JOB_ID_FIELD not in payload:
-            raise PortkeyExportError("Portkey export response missing job id")
-        raw_status = str(payload.get(_STATUS_FIELD, "")).lower()
-        status = _STATUS_MAP.get(raw_status, "running")
-        count = payload.get(_RECORD_COUNT_FIELD)
-        return PortkeyExportJob(
-            job_id=str(payload[_JOB_ID_FIELD]),
-            status=status,
-            record_count=count if isinstance(count, int) else None,
-            download_token=payload.get(_DOWNLOAD_FIELD),
+        if not isinstance(payload, dict):
+            raise PortkeyExportError("Portkey export response was not a JSON object")
+        return payload
+
+    def create_export(self, *, window_start: str, window_end: str) -> PortkeyExport:
+        body = {
+            "filters": {
+                "time_of_generation_min": window_start,
+                "time_of_generation_max": window_end,
+                "page_size": PAGE_SIZE_MAX,
+                "current_page": 1,
+            },
+            "requested_data": list(REQUESTED_DATA),
+        }
+        if self._workspace:
+            body["workspace_id"] = self._workspace
+        payload = self._parse(self._request("POST", EXPORTS_PATH, body=body))
+        if "id" not in payload:
+            raise PortkeyExportError("Portkey create-export response missing id")
+        total = payload.get("total")
+        return PortkeyExport(
+            export_id=str(payload["id"]),
+            total=total if isinstance(total, int) else None,
+            status=STATUS_DRAFT,
         )
 
-    def submit_export(self, *, window_start: str, window_end: str) -> PortkeyExportJob:
-        body = {"workspace_id": self._workspace, "start_time": window_start, "end_time": window_end}
-        return self._job_from_payload(self._request("POST", SUBMIT_PATH, body=body))
+    def start_export(self, export_id: str) -> None:
+        self._request("POST", f"{EXPORTS_PATH}/{export_id}/start", body={})
 
-    def get_job(self, job_id: str) -> PortkeyExportJob:
-        return self._job_from_payload(self._request("GET", JOB_PATH_TEMPLATE.format(job_id=job_id)))
+    def get_export(self, export_id: str) -> PortkeyExport:
+        payload = self._parse(self._request("GET", f"{EXPORTS_PATH}/{export_id}"))
+        total = payload.get("total")
+        return PortkeyExport(
+            export_id=str(payload.get("id", export_id)),
+            total=total if isinstance(total, int) else None,
+            status=str(payload.get("status", "")),
+        )
 
-    def download_to(self, job: PortkeyExportJob, dest_path: str) -> int:
-        if not job.download_token:
-            raise PortkeyExportError(f"job {job.job_id} has no download token")
-        request = urllib.request.Request(job.download_token, headers={_API_KEY_HEADER: self._api_key}, method="GET")
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response, open(dest_path, "wb") as dst:
-                raw = response.read()
-                dst.write(raw)
-        except urllib.error.HTTPError as exc:
-            raise PortkeyExportError(f"Portkey download failed: HTTP {exc.code} {exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise PortkeyExportError(f"Portkey download failed: {exc.reason}") from exc
+    def cancel_export(self, export_id: str) -> None:
+        self._request("POST", f"{EXPORTS_PATH}/{export_id}/cancel", body={})
+
+    def download_to(self, export_id: str, dest_path: str) -> int:
+        payload = self._parse(self._request("GET", f"{EXPORTS_PATH}/{export_id}/download"))
+        signed_url = payload.get("signed_url")
+        if not signed_url:
+            raise PortkeyExportError(f"export {export_id} download response missing signed_url")
+        raw = self._request("GET", signed_url, authed=False)  # pre-signed: no Portkey credential
+        with open(dest_path, "wb") as dst:
+            dst.write(raw)
         return sum(1 for line in raw.splitlines() if line.strip())
 ```
 
@@ -968,7 +1043,7 @@ Expected: PASS — all tests.
 
 ```bash
 git add src/metergraphrelay/providers/portkey_export.py tests/providers/test_portkey_export.py
-git commit -m "feat(portkey): add Portkey async Logs Export client (submit/poll/download)"
+git commit -m "feat(portkey): add Portkey beta Logs Export client (create/start/poll/download/cancel)"
 ```
 
 ---
@@ -980,7 +1055,7 @@ git commit -m "feat(portkey): add Portkey async Logs Export client (submit/poll/
 - Test: `tests/test_portkey_sync.py`
 
 **Interfaces:**
-- Consumes: `MeterGraphSyncClient`/`AcquireResult`/`LeaseLostError`/`MeterGraphSyncError` (Task 3); `PortkeyExportClient`/`PortkeyExportJob`/`PortkeyExportError` (Task 4); `TimeWindow`/`split_window` (Task 1); `ImportContext`/`convert_portkey_export` (Task 2); `push.push_file`.
+- Consumes: `MeterGraphSyncClient`/`AcquireResult`/`LeaseLostError`/`MeterGraphSyncError` (Task 3); `PortkeyExportClient`/`PortkeyExport`/`PortkeyExportError` (Task 4); `TimeWindow`/`split_window` (Task 1); `ImportContext`/`convert_portkey_export` (Task 2); `push.push_file`.
 - Produces (used by Task 6):
 ```python
 PORTKEY_SOURCE: str = "portkey"
@@ -1020,7 +1095,12 @@ def run_portkey_sync(
 import json
 
 from metergraphrelay.metergraph_sync import AcquiredLease, AcquireResult, LeaseLostError
-from metergraphrelay.providers.portkey_export import STATUS_COMPLETED, PortkeyExportJob
+from metergraphrelay.providers.portkey_export import (
+    STATUS_DRAFT,
+    STATUS_SUCCESS,
+    PortkeyExport,
+    PortkeyExportError,
+)
 from metergraphrelay.portkey_sync import VOLUME_SPLIT_THRESHOLD, run_portkey_sync
 
 WINDOW_START = "2026-08-19T00:00:00+00:00"
@@ -1078,29 +1158,47 @@ class FakeMeterGraph:
 
 
 class FakePortkey:
-    """Jobs complete immediately; rows keyed by (window_start, window_end)."""
-    def __init__(self, rows_by_window, record_counts=None):
+    """create_export returns the draft total immediately; get_export reports success.
+
+    Rows are keyed by (window_start, window_end); ``totals`` overrides the count a
+    given window's draft reports, and ``default_total`` overrides every window's.
+    """
+    def __init__(self, rows_by_window, totals=None, default_total=None):
         self._rows = rows_by_window
-        self._counts = record_counts or {}
-        self.submitted = []
+        self._totals = totals or {}
+        self._default_total = default_total
+        self.created = []       # list of (window_start, window_end)
+        self.started = []       # export_ids
+        self.cancelled = []     # export_ids
+        self._win_by_id = {}
+        self._seq = 0
 
-    def submit_export(self, *, window_start, window_end):
+    def _total_for(self, key):
+        if key in self._totals:
+            return self._totals[key]
+        if self._default_total is not None:
+            return self._default_total
+        return len(self._rows.get(key, []))
+
+    def create_export(self, *, window_start, window_end):
+        self._seq += 1
+        eid = f"exp-{self._seq}"
         key = (window_start, window_end)
-        self.submitted.append(key)
-        jid = f"job-{len(self.submitted)}"
-        count = self._counts.get(key, len(self._rows.get(key, [])))
-        self._pending = getattr(self, "_pending", {})
-        self._pending[jid] = key
-        return PortkeyExportJob(jid, STATUS_COMPLETED, count, f"dl://{jid}")
+        self.created.append(key)
+        self._win_by_id[eid] = key
+        return PortkeyExport(export_id=eid, total=self._total_for(key), status=STATUS_DRAFT)
 
-    def get_job(self, job_id):
-        key = self._pending[job_id]
-        count = self._counts.get(key, len(self._rows.get(key, [])))
-        return PortkeyExportJob(job_id, STATUS_COMPLETED, count, f"dl://{job_id}")
+    def start_export(self, export_id):
+        self.started.append(export_id)
 
-    def download_to(self, job, dest_path):
-        key = self._pending[job.job_id]
-        rows = self._rows.get(key, [])
+    def get_export(self, export_id):
+        return PortkeyExport(export_id=export_id, total=None, status=STATUS_SUCCESS)
+
+    def cancel_export(self, export_id):
+        self.cancelled.append(export_id)
+
+    def download_to(self, export_id, dest_path):
+        rows = self._rows.get(self._win_by_id[export_id], [])
         with open(dest_path, "w") as f:
             for r in rows:
                 f.write(json.dumps(r) + "\n")
@@ -1129,7 +1227,7 @@ def test_caught_up_is_a_clean_noop_exit():
     outcome = _run(mg, pk, pushes)
     assert outcome.status == "caught_up"
     assert outcome.exit_code == 0
-    assert pk.submitted == []
+    assert pk.created == []
     assert mg.completed == []
 
 
@@ -1150,7 +1248,7 @@ def test_acquire_receives_source_scope_initial_since_and_max_window():
     }
 
 
-def test_end_to_end_happy_path_acquires_downloads_normalizes_pushes_and_completes():
+def test_end_to_end_happy_path_creates_starts_downloads_normalizes_pushes_and_completes():
     rows = [_portkey_row("r1"), _portkey_row("r2")]
     pk = FakePortkey({(WINDOW_START, WINDOW_END): rows})
     mg = FakeMeterGraph(_acquired())
@@ -1160,8 +1258,10 @@ def test_end_to_end_happy_path_acquires_downloads_normalizes_pushes_and_complete
 
     assert outcome.status == "completed"
     assert outcome.exit_code == 0
-    assert pk.submitted == [(WINDOW_START, WINDOW_END)]
-    assert mg.completed == ["lease-1"]        # complete only after a successful push
+    assert pk.created == [(WINDOW_START, WINDOW_END)]
+    assert pk.started == ["exp-1"]            # the single hourly draft was started
+    assert pk.cancelled == []                  # nothing cancelled on the happy path
+    assert mg.completed == ["lease-1"]         # complete only after a successful push
     assert mg.abandoned == []
     assert mg.renewed >= 1                      # renewed during long phases
     # Pushed rows carry the server-dedup fields:
@@ -1172,33 +1272,50 @@ def test_end_to_end_happy_path_acquires_downloads_normalizes_pushes_and_complete
     assert pushes[0]["token"] == "tok-123"
 
 
-def test_over_threshold_triggers_one_split_into_ten_overlapping_windows():
+def test_over_threshold_cancels_unstarted_hourly_draft_and_splits_into_ten():
     full = (WINDOW_START, WINDOW_END)
-    # Full-window export reports > 50k -> discard, split into 10 sub-windows.
-    counts = {full: VOLUME_SPLIT_THRESHOLD + 1}
-    # Give every sub-window one row so downloads/pushes happen.
-    pk = FakePortkey({full: []}, record_counts=counts)
+    # The hourly DRAFT's create response reports > 50k -> cancel it (unstarted),
+    # then create 10 overlapping sub-window drafts (each small).
+    pk = FakePortkey({}, totals={full: VOLUME_SPLIT_THRESHOLD + 1})
 
-    # Sub-window rows are supplied lazily: FakePortkey.download_to reads by key,
-    # so seed rows for whatever sub-windows the orchestrator submits.
-    original_submit = pk.submit_export
-    def seeding_submit(*, window_start, window_end):
+    # Seed one row per sub-window as the orchestrator creates them, so downloads
+    # and pushes have content. Sub-window drafts default to len(rows) == 1 (<=50k).
+    original_create = pk.create_export
+    def seeding_create(*, window_start, window_end):
         pk._rows.setdefault((window_start, window_end), [_portkey_row(f"r-{window_start}")])
-        return original_submit(window_start=window_start, window_end=window_end)
-    pk.submit_export = seeding_submit
+        return original_create(window_start=window_start, window_end=window_end)
+    pk.create_export = seeding_create
 
     mg = FakeMeterGraph(_acquired())
     pushes = []
     outcome = _run(mg, pk, pushes)
 
     assert outcome.status == "completed"
-    # 1 full-window submit + 10 sub-window submits, exactly one split (no recursion).
-    assert len(pk.submitted) == 1 + 10
-    sub_windows = pk.submitted[1:]
-    assert len(sub_windows) == 10
-    assert sub_windows[0][0] == WINDOW_START            # first sub-window starts at window start
-    assert sub_windows[-1][1] == WINDOW_END             # last sub-window ends at window end
-    assert mg.completed == ["lease-1"]                   # completed only after all ten pushed
+    # 1 hourly draft + 10 sub-window drafts, exactly one split (no recursion).
+    assert pk.created[0] == full
+    assert len(pk.created) == 1 + 10
+    assert pk.cancelled == ["exp-1"]                 # the unstarted hourly draft, only
+    assert pk.started == [f"exp-{i}" for i in range(2, 12)]  # only the ten sub-windows start
+    sub_windows = pk.created[1:]
+    assert sub_windows[0][0] == WINDOW_START          # first sub-window starts at window start
+    assert sub_windows[-1][1] == WINDOW_END           # last sub-window ends at window end
+    assert mg.completed == ["lease-1"]                 # completed only after all ten pushed
+
+
+def test_subwindow_still_over_threshold_is_rejected_without_recursion():
+    # Every window (hourly and sub-windows) reports > 50k -> after the split the
+    # first sub-window is still oversized -> clear rejection, no recursive split.
+    pk = FakePortkey({}, default_total=VOLUME_SPLIT_THRESHOLD + 1)
+    mg = FakeMeterGraph(_acquired())
+
+    outcome = _run(mg, pk, [])
+
+    assert outcome.status == "failed"
+    assert outcome.exit_code == 1
+    assert mg.completed == []
+    assert mg.abandoned == ["lease-1"]                 # handled failure releases the lease
+    assert "exp-1" in pk.cancelled                      # unstarted hourly draft cancelled
+    assert pk.started == []                             # nothing was ever started
 
 
 def test_push_failure_abandons_lease_and_exits_nonzero_without_completing():
@@ -1217,13 +1334,12 @@ def test_push_failure_abandons_lease_and_exits_nonzero_without_completing():
     assert mg.abandoned == ["lease-1"]        # handled failure releases the lease
 
 
-def test_portkey_error_abandons_lease_and_exits_nonzero():
+def test_portkey_error_best_effort_cancels_and_abandons_lease():
     mg = FakeMeterGraph(_acquired())
 
     class Boom(FakePortkey):
-        def submit_export(self, *, window_start, window_end):
-            from metergraphrelay.providers.portkey_export import PortkeyExportError
-            raise PortkeyExportError("submit boom")
+        def create_export(self, *, window_start, window_end):
+            raise PortkeyExportError("create boom")
 
     outcome = _run(mg, Boom({}), [])
     assert outcome.status == "failed"
@@ -1262,7 +1378,7 @@ from dataclasses import dataclass
 
 from .metergraph_sync import LeaseLostError, MeterGraphSyncError
 from .providers.portkey import ImportContext, convert_portkey_export
-from .providers.portkey_export import PortkeyExportError, PortkeyExportJob
+from .providers.portkey_export import PortkeyExportError
 from .push import push_file
 from .window import TimeWindow, split_window
 
@@ -1310,18 +1426,25 @@ def run_portkey_sync(
 
     lease = acquire.lease
     ctx = ImportContext(source=PORTKEY_SOURCE, source_scope=source_scope)
+    created_export_ids: list[str] = []  # every draft this run created, for best-effort cancel
     try:
         with tempfile.TemporaryDirectory(dir=work_dir) as staging:
-            jobs = _collect_export_jobs(
-                pk_client, lease, mg_client,
-                sleep=sleep, poll_interval=poll_interval_seconds, max_poll_seconds=max_poll_seconds,
+            # 1) Plan from the draft total(s) — decides split BEFORE starting anything.
+            export_ids = _plan_exports(pk_client, lease, created_export_ids)
+            # 2) Start and poll all planned exports together, renewing each poll round.
+            for export_id in export_ids:
+                pk_client.start_export(export_id)
+            _poll_all(
+                export_ids, pk_client, mg_client, lease.lease_id,
+                sleep, poll_interval_seconds, max_poll_seconds,
             )
+            # 3) Download -> normalize (+ ImportContext dedup fields) -> push, renewing throughout.
             mg_client.renew(lease.lease_id)  # renew before the download/normalize/upload phase
             pushed = failed = skipped = 0
-            for i, job in enumerate(jobs):
+            for i, export_id in enumerate(export_ids):
                 raw = os.path.join(staging, f"raw-{i}.jsonl")
                 converted_path = os.path.join(staging, f"converted-{i}.jsonl")
-                pk_client.download_to(job, raw)
+                pk_client.download_to(export_id, raw)
                 mg_client.renew(lease.lease_id)  # renew after download, before normalize/upload
                 _, sk = convert_portkey_export(raw, converted_path, import_context=ctx)
                 skipped += sk
@@ -1335,7 +1458,7 @@ def run_portkey_sync(
                     "failed", f"{failed} row(s) failed to upload; lease released, will retry next run.",
                     1, pushed=pushed, failed=failed, skipped=skipped,
                 )
-            mg_client.complete(lease.lease_id)
+            mg_client.complete(lease.lease_id)  # complete ONLY after every upload succeeded
             return SyncOutcome(
                 "completed",
                 f"Imported window {lease.window_start}..{lease.window_end}: "
@@ -1343,42 +1466,66 @@ def run_portkey_sync(
                 0, pushed=pushed, failed=failed, skipped=skipped,
             )
     except LeaseLostError as exc:
+        _best_effort_cancel(pk_client, created_export_ids)
         return SyncOutcome("failed", f"Lease lost mid-run ({exc}); relying on server expiry.", 1)
     except (PortkeyExportError, MeterGraphSyncError, OSError) as exc:
+        _best_effort_cancel(pk_client, created_export_ids)
         mg_client.abandon(lease.lease_id)
         return SyncOutcome("failed", f"Sync failed: {exc}; lease released.", 1)
 
 
-def _collect_export_jobs(pk_client, lease, mg_client, *, sleep, poll_interval, max_poll_seconds):
-    full = pk_client.submit_export(window_start=lease.window_start, window_end=lease.window_end)
-    full = _poll_all([full], pk_client, mg_client, lease.lease_id, sleep, poll_interval, max_poll_seconds)[0]
-    if full.record_count is not None and full.record_count > VOLUME_SPLIT_THRESHOLD:
-        sub_windows = split_window(TimeWindow(start=lease.window_start, end=lease.window_end))
-        sub_jobs = [pk_client.submit_export(window_start=w.start, window_end=w.end) for w in sub_windows]
-        return _poll_all(sub_jobs, pk_client, mg_client, lease.lease_id, sleep, poll_interval, max_poll_seconds)
-    return [full]
+def _plan_exports(pk_client, lease, created_export_ids: list[str]) -> list[str]:
+    """Create the hourly draft; its ``total`` decides whether to split. No start/poll here."""
+    hourly = pk_client.create_export(window_start=lease.window_start, window_end=lease.window_end)
+    created_export_ids.append(hourly.export_id)
+    if hourly.total is None or hourly.total <= VOLUME_SPLIT_THRESHOLD:
+        return [hourly.export_id]
+    # Oversized: cancel the still-unstarted hourly draft, then split into exactly 10.
+    pk_client.cancel_export(hourly.export_id)
+    created_export_ids.remove(hourly.export_id)
+    export_ids: list[str] = []
+    for w in split_window(TimeWindow(start=lease.window_start, end=lease.window_end)):
+        draft = pk_client.create_export(window_start=w.start, window_end=w.end)
+        created_export_ids.append(draft.export_id)
+        if draft.total is not None and draft.total > VOLUME_SPLIT_THRESHOLD:
+            raise PortkeyExportError(
+                f"sub-window {w.start}..{w.end} still exceeds {VOLUME_SPLIT_THRESHOLD} "
+                f"records ({draft.total}); MVP does not split recursively"
+            )
+        export_ids.append(draft.export_id)
+    return export_ids
 
 
-def _poll_all(jobs, pk_client, mg_client, lease_id, sleep, poll_interval, max_poll_seconds):
-    current = list(jobs)
+def _poll_all(export_ids, pk_client, mg_client, lease_id, sleep, poll_interval, max_poll_seconds):
     elapsed = 0.0
-    while not all(j.is_terminal for j in current):
+    states = {eid: pk_client.get_export(eid) for eid in export_ids}
+    while not all(e.is_terminal for e in states.values()):
         sleep(poll_interval)
         elapsed += poll_interval
         mg_client.renew(lease_id)  # keep the lease alive across the whole poll loop
-        current = [pk_client.get_job(j.job_id) if not j.is_terminal else j for j in current]
+        states = {
+            eid: (e if e.is_terminal else pk_client.get_export(eid)) for eid, e in states.items()
+        }
         if elapsed >= max_poll_seconds:
             raise PortkeyExportError(f"Portkey export polling exceeded {max_poll_seconds}s safety cap")
-    failures = [j.job_id for j in current if not j.is_success]
+    failures = [eid for eid, e in states.items() if not e.is_success]
     if failures:
-        raise PortkeyExportError(f"Portkey export job(s) failed: {', '.join(failures)}")
-    return current
+        raise PortkeyExportError(f"Portkey export(s) did not succeed: {', '.join(failures)}")
+
+
+def _best_effort_cancel(pk_client, export_ids) -> None:
+    """Cancel any created, possibly non-terminal exports without masking the primary error."""
+    for export_id in export_ids:
+        try:
+            pk_client.cancel_export(export_id)
+        except (PortkeyExportError, OSError):
+            pass
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_portkey_sync.py -v`
-Expected: PASS — all tests (happy path, split path, busy/caught_up, push failure, portkey error, lease-lost).
+Expected: PASS — all tests (happy path, cancel-then-split-into-ten, sub-window-still-oversize rejection, busy/caught_up, push failure, portkey error best-effort cancel, lease-lost).
 
 - [ ] **Step 5: Commit**
 
@@ -1788,7 +1935,8 @@ git commit -m "docs: document Portkey API cron mode; chore: bump version to 0.4.
 | busy/caught_up clean no-op exits (0) | Tasks 5, 6 |
 | Complete only after all uploads succeed | Task 5 (`if failed: abandon` before `complete`) |
 | Submit→poll→download→normalize→upload | Task 5 |
-| >50k → one split into 10 intervals w/ 1s overlap, poll together | Task 1 (`split_window`), Task 5 (threshold+orchestration) |
+| Draft `total` decides split; >50k → cancel unstarted hourly, split into 10 w/ 1s overlap, reject if any sub-window still >50k (no recursion), poll ten together | Task 1 (`split_window`), Task 5 (`_plan_exports`+`_poll_all`) |
+| Best-effort cancel of created non-terminal jobs on failure, without masking primary error | Task 5 (`_best_effort_cancel`) |
 | Isolate window/orchestration from CLI; Portkey only | Tasks 1/5 (modules), Task 6 (thin CLI) |
 | Actionable errors, safe secret handling, consistent timeout | Tasks 3/4/5/6 |
 | README + `--help` updates | Tasks 6 (help), 7 (README/.env) |
@@ -1798,11 +1946,11 @@ git commit -m "docs: document Portkey API cron mode; chore: bump version to 0.4.
 
 No gaps found.
 
-**2. Placeholder scan:** All test and implementation steps contain concrete code; no "TBD"/"add error handling"/"similar to Task N". The one deliberately-unverified area (Portkey wire format) is explicitly flagged with named constants and a quarantine boundary in Task 4 — not a silent placeholder.
+**2. Placeholder scan:** All test and implementation steps contain concrete code; no "TBD"/"add error handling"/"similar to Task N". The Portkey wire format is no longer speculative — Task 4 implements the docs-verified beta Logs Export contract (create/start/get/download/cancel, `x-portkey-api-key`, signed-URL download) with no ASSUMPTION callout remaining.
 
 **3. Type consistency check:**
 - `MeterGraphSyncClient.acquire(...) -> AcquireResult`; `.lease: AcquiredLease | None`; fields `lease_id`/`window_start`/`window_end`/`lease_expires_at`/`checkpoint_version` used identically in Tasks 3 and 5. ✔
-- `PortkeyExportJob(job_id, status, record_count, download_token)` with `.is_terminal`/`.is_success`; used identically in Tasks 4 and 5 (and in the Task 5 fakes). ✔
+- `PortkeyExport(export_id, total, status)` with `.is_terminal`/`.is_success`, and client methods `create_export`/`start_export`/`get_export`/`download_to`/`cancel_export`; used identically in Tasks 4 and 5 (and in the Task 5 fakes). ✔
 - `TimeWindow(start, end)` and `split_window(window)` names/fields match between Tasks 1 and 5. ✔
 - `ImportContext(source, source_scope)` and `convert_portkey_export(in, out, *, import_context=...)` match between Tasks 2 and 5. ✔
 - `run_portkey_sync(...) -> SyncOutcome(status, detail, exit_code, ...)`; consumed by CLI in Task 6 via `.detail`/`.exit_code`. ✔
@@ -1819,4 +1967,4 @@ No drift found.
 
 **2. Inline Execution** — execute tasks in this session using executing-plans, batch execution with checkpoints.
 
-**Which approach?** (Note: Task 4's Portkey wire format must be confirmed against Portkey's Logs Export API docs before its production HTTP is written — flagged in-task.)
+**Which approach?** (Task 4's Portkey wire format is now docs-verified; no external confirmation blocks execution. If Portkey's beta API shifts, the change is contained to `providers/portkey_export.py` and its test file.)
