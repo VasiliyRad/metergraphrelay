@@ -19,6 +19,7 @@ from metergraphrelay.metergraph_sync import (
     MeterGraphSyncError,
 )
 from metergraphrelay.providers.portkey_export import (
+    PAGE_SIZE_MAX,
     STATUS_DRAFT,
     STATUS_FAILED,
     STATUS_IN_PROGRESS,
@@ -341,6 +342,42 @@ def test_end_to_end_happy_path_creates_starts_downloads_normalizes_pushes_and_co
 
 
 # -- volume split ----------------------------------------------------------
+
+
+def test_volume_split_threshold_is_the_export_page_size_max():
+    # Single source of truth: create_export fetches exactly one page of PAGE_SIZE_MAX
+    # rows, so any window whose draft total exceeds PAGE_SIZE_MAX cannot fit in one
+    # page and MUST split. Deriving the threshold from PAGE_SIZE_MAX makes silent
+    # data loss (threshold drifting above the page size) structurally impossible.
+    assert VOLUME_SPLIT_THRESHOLD == PAGE_SIZE_MAX
+
+
+def test_window_one_over_page_size_max_splits_and_exactly_at_it_does_not():
+    # Behaviour keyed off PAGE_SIZE_MAX (not a hardcoded 50_000): total == page size
+    # uses the hourly draft as-is; total == page size + 1 triggers the 10-way split.
+    full = (WINDOW_START, WINDOW_END)
+
+    at_limit = FakePortkey({full: [_portkey_row("r1")]}, totals={full: PAGE_SIZE_MAX})
+    outcome = _run(FakeMeterGraph(_acquired()), at_limit, [])
+    assert outcome.status == "completed"
+    assert at_limit.created == [full]          # no split exactly at the page size
+    assert at_limit.cancelled == []
+
+    over = FakePortkey({}, totals={full: PAGE_SIZE_MAX + 1})
+    original_create = over.create_export
+
+    def seeding_create(*, window_start, window_end):
+        over._rows.setdefault((window_start, window_end), [_portkey_row(f"r-{window_start}")])
+        return original_create(window_start=window_start, window_end=window_end)
+
+    over.create_export = seeding_create
+    outcome = _run(FakeMeterGraph(_acquired()), over, [])
+    assert outcome.status == "completed"
+    assert len(over.created) == 1 + 10         # one page over the max -> split into ten
+    assert over.cancelled == ["exp-1"]
+
+
+# -- volume split (threshold constant) -------------------------------------
 
 
 def test_over_threshold_cancels_unstarted_hourly_draft_and_splits_into_ten():

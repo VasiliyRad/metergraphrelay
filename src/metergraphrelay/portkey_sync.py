@@ -37,15 +37,18 @@ from .providers.portkey import (
     PortkeyConversionError,
     convert_portkey_export,
 )
-from .providers.portkey_export import PortkeyExportError
+from .providers.portkey_export import PAGE_SIZE_MAX, PortkeyExportError
 from .push import push_file
 from .window import TimeWindow, split_window
 
 PORTKEY_SOURCE = "portkey"
 # Decided from the draft's ``total``: <= threshold uses the hourly draft as-is;
 # strictly greater triggers the one-shot 10-way split. (total == threshold does
-# NOT split.)
-VOLUME_SPLIT_THRESHOLD = 50_000
+# NOT split.) Derived from ``PAGE_SIZE_MAX`` — create_export fetches exactly one
+# page of that many rows, so a window whose total exceeds it cannot fit in a single
+# page and must split. Keeping this a single source of truth makes it impossible
+# for the threshold to silently drift above the page size and drop rows.
+VOLUME_SPLIT_THRESHOLD = PAGE_SIZE_MAX
 POLL_INTERVAL_SECONDS = 15.0
 MAX_POLL_SECONDS = 3300.0  # 55 min safety cap; renewal keeps the lease alive within it
 # Renew at most this often. Comfortably inside the server's 15-minute (900s) lease
