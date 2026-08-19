@@ -14,6 +14,13 @@ class ImportContext:
     source_scope: str
 
 
+class PortkeyConversionError(ValueError):
+    """Raised when a row cannot be converted for import (e.g. an unusable
+    ``import_event_id``). Subclasses ValueError so it is never swallowed by the
+    per-row ``KeyError``/``TypeError``/``AttributeError`` skip path — an invalid
+    imported id must fail the whole window, not silently drop a record."""
+
+
 def _tool_call_name(call: Any) -> str | None:
     if not isinstance(call, dict):
         return None
@@ -83,9 +90,40 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
     return json.dumps(response), None
 
 
+IMPORT_EVENT_ID_MAX_LENGTH = 512
+
+
+def _canonical_import_event_id(raw: Any) -> str:
+    """Validate a Portkey row id for use as ``import_event_id``.
+
+    metergraph-internal's import identity validator requires a string whose
+    stripped length is 1..512; a numeric, blank, or oversized id would make the
+    async import worker fail the whole batch *after* the relay has uploaded it.
+    Reject it here so API mode fails the window before upload. ``bool`` is an
+    ``int`` subclass, so it is rejected as a non-string.
+    """
+    if not isinstance(raw, str):
+        raise PortkeyConversionError(
+            f"import_event_id must be a string, got {type(raw).__name__}"
+        )
+    canonical = raw.strip()
+    if not 1 <= len(canonical) <= IMPORT_EVENT_ID_MAX_LENGTH:
+        raise PortkeyConversionError(
+            "import_event_id must be 1.."
+            f"{IMPORT_EVENT_ID_MAX_LENGTH} characters after stripping, "
+            f"got length {len(canonical)}"
+        )
+    return canonical
+
+
 def normalize_portkey_row(
     row: dict, *, import_context: ImportContext | None = None
 ) -> dict:
+    import_event_id = None
+    if import_context is not None:
+        # Validate the imported id before anything else so a bad id fails the
+        # window cleanly (row.get avoids a KeyError being swallowed as a skip).
+        import_event_id = _canonical_import_event_id(row.get("id"))
     ts = row["created_at"]
     request_id = row["id"]
     trace_id = row["trace_id"]
@@ -145,7 +183,7 @@ def normalize_portkey_row(
     if import_context is not None:
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope
-        result["import_event_id"] = request_id  # request_id is already row["id"]
+        result["import_event_id"] = import_event_id  # validated, stripped id
     return result
 
 
