@@ -1,0 +1,59 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  latest-relay-latest-server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: metergraph
+          POSTGRES_PASSWORD: metergraph
+          POSTGRES_DB: metergraph
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U metergraph"
+          --health-interval 2s --health-timeout 2s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check out latest OSS server
+        uses: actions/checkout@v4
+        with:
+          repository: PioneerSquareLabs/metergraph
+          ref: main
+          path: .latest-metergraph
+      - name: Install latest relay and latest server
+        run: pip install -e . -e ".latest-metergraph/server[dev]"
+      - name: Start OSS server
+        run: |
+          uvicorn metergraph_server.main:app --port 8787 &
+          for i in $(seq 1 30); do curl -sf localhost:8787/healthz && break; sleep 1; done
+        env:
+          DATABASE_URL: postgresql://metergraph:metergraph@localhost:5432/metergraph
+          MG_TOKENS: ci-token
+      - name: Preserve historical timestamp through ingest and API
+        run: python tests/e2e/oss_server_timestamp.py
+        env:
+          MG_URL: http://localhost:8787
+          MG_TOKEN: ci-token

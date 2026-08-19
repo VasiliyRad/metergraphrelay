@@ -173,6 +173,41 @@ def test_normalize_portkey_row_maps_verified_fields():
     assert result["content_opted_in"] is True
 
 
+@pytest.mark.parametrize(
+    ("created_at", "expected"),
+    [
+        ("2026-08-10T05:00:00-07:00", "2026-08-10T12:00:00Z"),
+        ("2026-08-10T12:00:00.123456Z", "2026-08-10T12:00:00.123456Z"),
+        (1786363200, "2026-08-10T12:00:00Z"),
+        (1786363200000, "2026-08-10T12:00:00Z"),
+        ("1786363200000", "2026-08-10T12:00:00Z"),
+    ],
+)
+def test_normalize_portkey_row_canonicalizes_timestamp_to_rfc3339_utc(
+    created_at, expected
+):
+    result = normalize_portkey_row(_responses_row(created_at=created_at))
+
+    assert result["ts"] == expected
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [None, "", "not-a-timestamp", "2026-08-10T12:00:00", True],
+)
+def test_normalize_portkey_row_rejects_invalid_timestamp(created_at):
+    with pytest.raises(PortkeyConversionError, match="created_at"):
+        normalize_portkey_row(_responses_row(created_at=created_at))
+
+
+def test_normalize_portkey_row_rejects_missing_timestamp():
+    row = _responses_row()
+    del row["created_at"]
+
+    with pytest.raises(PortkeyConversionError, match="created_at"):
+        normalize_portkey_row(row)
+
+
 def test_normalize_portkey_row_route_falls_back_when_workflow_name_missing():
     row = _responses_row(metadata={"activity_name": "summarize"})
 
@@ -223,7 +258,7 @@ def test_normalize_portkey_row_error_type_stays_none_when_error_key_absent():
     assert result["error_type"] is None
 
 
-@pytest.mark.parametrize("missing_field", ["id", "created_at", "trace_id"])
+@pytest.mark.parametrize("missing_field", ["id", "trace_id"])
 def test_normalize_portkey_row_missing_required_field_raises_key_error(missing_field):
     row = _responses_row()
     del row[missing_field]
@@ -387,7 +422,7 @@ def test_convert_portkey_export_skips_malformed_json_line(tmp_path, capsys):
     assert good["request"]["input"] not in captured.err
 
 
-def test_convert_portkey_export_skips_row_missing_required_field(tmp_path, capsys):
+def test_convert_portkey_export_rejects_row_missing_timestamp(tmp_path):
     input_path = tmp_path / "export.jsonl"
     bad = _responses_row(id="row-bad", trace_id="trace-bad")
     del bad["created_at"]
@@ -395,13 +430,10 @@ def test_convert_portkey_export_skips_row_missing_required_field(tmp_path, capsy
     input_path.write_text(json.dumps(bad) + "\n" + json.dumps(good) + "\n")
     output_path = tmp_path / "converted.jsonl"
 
-    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+    with pytest.raises(PortkeyConversionError, match="created_at"):
+        convert_portkey_export(str(input_path), str(output_path))
 
-    assert converted == 1
-    assert skipped == 1
-    captured = capsys.readouterr()
-    assert "row-bad" in captured.err
-    assert good["request"]["input"] not in captured.err
+    assert output_path.read_text() == ""
 
 
 def test_convert_portkey_export_raises_oserror_on_missing_input(tmp_path):
