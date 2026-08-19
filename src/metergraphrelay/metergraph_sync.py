@@ -94,11 +94,8 @@ class MeterGraphSyncClient:
         except urllib.error.URLError as exc:
             raise MeterGraphSyncError(f"acquire failed: {exc.reason}") from exc
         if status == 201:
-            missing = [f for f in _ACQUIRED_REQUIRED_FIELDS if f not in payload]
-            if missing:
-                raise MeterGraphSyncError(
-                    f"acquire returned an incomplete lease, missing: {', '.join(missing)}"
-                )
+            for field in _ACQUIRED_REQUIRED_FIELDS:
+                self._require_nonempty_str(payload.get(field), field, "acquire")
             return AcquireResult(
                 status="acquired",
                 lease=AcquiredLease(
@@ -109,11 +106,15 @@ class MeterGraphSyncClient:
                     lease_expires_at=payload["lease_expires_at"],
                 ),
             )
-        return AcquireResult(status="caught_up")
+        if status == 200:
+            return AcquireResult(status="caught_up")
+        raise MeterGraphSyncError(f"acquire returned an unexpected status: HTTP {status}")
 
     def renew(self, lease_id: str) -> str:
         payload = self._lease_call("POST", f"{LEASES_PATH}/{self._quote(lease_id)}/renew")
-        return payload.get("lease_expires_at", "")
+        expiry = payload.get("lease_expires_at")
+        self._require_nonempty_str(expiry, "lease_expires_at", "renew")
+        return expiry
 
     def complete(self, lease_id: str) -> None:
         self._lease_call("POST", f"{LEASES_PATH}/{self._quote(lease_id)}/complete")
@@ -135,6 +136,13 @@ class MeterGraphSyncClient:
         except urllib.error.URLError as exc:
             raise MeterGraphSyncError(f"get_state failed: {exc.reason}") from exc
         return payload
+
+    @staticmethod
+    def _require_nonempty_str(value: object, field: str, context: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise MeterGraphSyncError(
+                f"{context} response has a missing or invalid {field}"
+            )
 
     @staticmethod
     def _quote(lease_id: str) -> str:

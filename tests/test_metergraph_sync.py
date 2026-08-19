@@ -101,6 +101,49 @@ def test_acquire_unexpected_status_raises_sync_error():
             _client().acquire(source="portkey", source_scope="ws-acme")
 
 
+@pytest.mark.parametrize("status", [202, 203, 204])
+def test_acquire_unexpected_2xx_status_raises_sync_error(status):
+    # Only 201 (acquired) and 200 (caught_up) are valid; any other returned
+    # status must be surfaced, never silently treated as caught_up.
+    with patch("metergraphrelay.metergraph_sync.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(status, b"{}")
+        with pytest.raises(MeterGraphSyncError, match=str(status)):
+            _client().acquire(source="portkey", source_scope="ws-acme")
+
+
+@pytest.mark.parametrize("field", ["lease_id", "window_start", "window_end", "lease_expires_at"])
+@pytest.mark.parametrize("bad", ["", "   ", None, 7])
+def test_acquire_201_rejects_blank_or_nonstring_required_field(field, bad):
+    payload = {
+        "lease_id": "lease-1",
+        "checkpoint_version": 7,
+        "window_start": "2026-08-19T00:00:00+00:00",
+        "window_end": "2026-08-19T01:00:00+00:00",
+        "lease_expires_at": "2026-08-19T00:15:00+00:00",
+    }
+    payload[field] = bad
+    with patch("metergraphrelay.metergraph_sync.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(201, json.dumps(payload).encode())
+        with pytest.raises(MeterGraphSyncError, match=field):
+            _client().acquire(source="portkey", source_scope="ws-acme")
+
+
+def test_acquire_201_allows_opaque_checkpoint_version():
+    # checkpoint_version is opaque/echoed-only: a null value is acceptable.
+    payload = {
+        "lease_id": "lease-1",
+        "checkpoint_version": None,
+        "window_start": "2026-08-19T00:00:00+00:00",
+        "window_end": "2026-08-19T01:00:00+00:00",
+        "lease_expires_at": "2026-08-19T00:15:00+00:00",
+    }
+    with patch("metergraphrelay.metergraph_sync.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(201, json.dumps(payload).encode())
+        result = _client().acquire(source="portkey", source_scope="ws-acme")
+    assert result.status == "acquired"
+    assert result.lease.checkpoint_version is None
+
+
 def test_renew_posts_to_lease_path_and_returns_new_expiry():
     body = json.dumps({"lease_expires_at": "2026-08-19T00:30:00+00:00"}).encode()
     with patch("metergraphrelay.metergraph_sync.urllib.request.urlopen") as mock:
@@ -110,6 +153,16 @@ def test_renew_posts_to_lease_path_and_returns_new_expiry():
     assert request.full_url == f"{BASE}/v1/import-sync/leases/lease-1/renew"
     assert request.method == "POST"
     assert expires == "2026-08-19T00:30:00+00:00"
+
+
+@pytest.mark.parametrize("body", [b"{}", b'{"lease_expires_at": null}', b'{"lease_expires_at": ""}', b'{"lease_expires_at": "   "}', b'{"lease_expires_at": 123}'])
+def test_renew_rejects_missing_blank_or_nonstring_expiry(body):
+    # A successful renew must yield a usable nonempty expiry string; anything
+    # else is a broken contract and must raise, never return ''.
+    with patch("metergraphrelay.metergraph_sync.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(200, body)
+        with pytest.raises(MeterGraphSyncError, match="lease_expires_at"):
+            _client().renew("lease-1")
 
 
 def test_renew_404_raises_lease_lost():
