@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from metergraphrelay.cli import build_parser, main
+from metergraphrelay.portkey_sync import SyncOutcome
 from metergraphrelay.providers.langfuse import LangfuseAPIError
 
 
@@ -687,3 +688,252 @@ def test_readme_pull_langfuse_examples_parse_successfully():
             "tier-1",
         ]
     )
+
+
+def test_sync_portkey_manual_mode_still_dispatches_to_local_converter(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("")
+
+    with patch("metergraphrelay.cli._run_sync_portkey", return_value=0) as manual, patch(
+        "metergraphrelay.cli._run_sync_portkey_api"
+    ) as api:
+        exit_code = main(["sync", "portkey", str(export_file), "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    manual.assert_called_once()
+    api.assert_not_called()
+
+
+def test_sync_portkey_no_export_file_dispatches_to_api_mode(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch("metergraphrelay.cli._run_sync_portkey_api", return_value=0) as api, patch(
+        "metergraphrelay.cli._run_sync_portkey"
+    ) as manual:
+        exit_code = main(
+            ["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 0
+    api.assert_called_once()
+    manual.assert_not_called()
+
+
+def test_sync_portkey_api_missing_portkey_credential_returns_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\n")
+
+    exit_code = main(
+        ["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)]
+    )
+
+    assert exit_code == 1
+    assert "PORTKEY_API_KEY" in capsys.readouterr().err
+
+
+def test_sync_portkey_api_missing_source_scope_returns_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    exit_code = main(["sync", "portkey", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "source" in err.lower() or "PORTKEY_WORKSPACE" in err
+
+
+def test_sync_portkey_api_source_scope_from_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\nPORTKEY_WORKSPACE=ws-from-env\n"
+    )
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("completed", "done", 0),
+    ) as run:
+        exit_code = main(["sync", "portkey", "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    assert run.call_args.kwargs["source_scope"] == "ws-from-env"
+
+
+def test_sync_portkey_api_flag_overrides_env_source_scope(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\nPORTKEY_WORKSPACE=ws-from-env\n"
+    )
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("completed", "done", 0),
+    ) as run:
+        main(["sync", "portkey", "--source-scope", "ws-flag", "--env-file", str(env_file)])
+
+    assert run.call_args.kwargs["source_scope"] == "ws-flag"
+
+
+def test_sync_portkey_api_passes_initial_since_and_max_window(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("caught_up", "caught up", 0),
+    ) as run:
+        main(
+            [
+                "sync", "portkey", "--source-scope", "ws-acme",
+                "--initial-since", "2026-08-01T00:00:00+00:00",
+                "--env-file", str(env_file),
+            ]
+        )
+
+    kwargs = run.call_args.kwargs
+    assert kwargs["initial_since"] == "2026-08-01T00:00:00+00:00"
+    assert kwargs["max_window_seconds"] == 3600
+
+
+def test_sync_portkey_api_rejects_naive_initial_since(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    exit_code = main(
+        [
+            "sync", "portkey", "--source-scope", "ws-acme",
+            "--initial-since", "2026-08-01T00:00:00", "--env-file", str(env_file),
+        ]
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "--initial-since" in err
+    assert "aware" in err.lower() or "timezone" in err.lower()
+
+
+def test_sync_portkey_api_rejects_max_window_over_3600(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    exit_code = main(
+        [
+            "sync", "portkey", "--source-scope", "ws-acme",
+            "--max-window-seconds", "7200", "--env-file", str(env_file),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "3600" in capsys.readouterr().err
+
+
+def test_sync_portkey_output_flag_rejected_in_api_mode(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    exit_code = main(
+        [
+            "sync", "portkey", "--source-scope", "ws-acme",
+            "--output", "converted.jsonl", "--env-file", str(env_file),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--output" in capsys.readouterr().err
+
+
+def test_sync_portkey_api_base_url_override_passed_to_clients(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n"
+        "PORTKEY_BASE_URL=https://portkey.internal/v1\n"
+        "METERGRAPH_INGEST_URL=https://mg.internal\n"
+    )
+
+    with patch(
+        "metergraphrelay.cli.MeterGraphSyncClient"
+    ) as mg_cls, patch(
+        "metergraphrelay.cli.PortkeyExportClient"
+    ) as pk_cls, patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("caught_up", "caught up", 0),
+    ) as run:
+        exit_code = main(["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    assert mg_cls.call_args.args[0] == "https://mg.internal"
+    assert pk_cls.call_args.kwargs["base_url"] == "https://portkey.internal/v1"
+    assert run.call_args.kwargs["ingest_base_url"] == "https://mg.internal"
+
+
+def test_sync_portkey_api_error_returns_clean_exit(tmp_path, capsys):
+    from metergraphrelay.metergraph_sync import MeterGraphSyncError
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        side_effect=MeterGraphSyncError("acquire failed: HTTP 500 err"),
+    ):
+        exit_code = main(["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("Error: ")
+    assert "Traceback" not in err
+
+
+def test_sync_portkey_api_completed_prints_detail_and_exits_zero(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("completed", "Synced window; pushed 3 row(s), 0 failed.", 0),
+    ):
+        exit_code = main(["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    assert "pushed 3 row(s)" in capsys.readouterr().out
+
+
+def test_sync_portkey_api_failed_outcome_returns_nonzero(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("failed", "Portkey export failed.", 1),
+    ):
+        exit_code = main(["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)])
+
+    assert exit_code == 1
+    assert "Portkey export failed." in capsys.readouterr().out
+
+
+def test_sync_portkey_api_busy_prints_and_exits_zero(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
+
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("busy", "Another sync holds the lease; retry at X.", 0),
+    ):
+        exit_code = main(["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    assert "retry at" in capsys.readouterr().out.lower()
+
+
+def test_sync_portkey_help_documents_api_mode(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sync", "portkey", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    for expected in [
+        "--source-scope", "--initial-since", "--max-window-seconds",
+        "PORTKEY_API_KEY", "workspace",
+    ]:
+        assert expected in help_text, f"missing {expected!r} in --help output"

@@ -7,7 +7,7 @@ from metergraphrelay.config import CREDENTIAL_SPECS
 # optional (no ConfigError check) and therefore not in CREDENTIAL_SPECS.
 ENV_VARS_READ_BY_CLI = sorted(
     {name for names in CREDENTIAL_SPECS.values() for name in names}
-    | {"METERGRAPH_INGEST_URL", "LANGFUSE_BASE_URL"}
+    | {"METERGRAPH_INGEST_URL", "LANGFUSE_BASE_URL", "PORTKEY_WORKSPACE", "PORTKEY_BASE_URL"}
 )
 
 
