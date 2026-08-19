@@ -8,11 +8,21 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Callable
 
+from .. import __version__
+
 # Docs-verified Portkey beta Logs Export contract
 # (/api-reference/admin-api/data-plane/logs/log-exports-beta/).
 DEFAULT_PORTKEY_URL = "https://api.portkey.ai/v1"
 EXPORTS_PATH = "/logs/exports"
 _API_KEY_HEADER = "x-portkey-api-key"
+# A stable, explicit User-Agent derived from the package name/version. The default
+# Python-urllib UA is blocked by Cloudflare (observed: HTTP 403 code 1010); every
+# request must send this instead.
+USER_AGENT = f"metergraphrelay/{__version__}"
+# Concise, non-sensitive label required in the create-export body (Portkey returns
+# error AB01 without it). Deliberately a static constant — it never carries the
+# tenant/workspace id or any secret.
+EXPORT_DESCRIPTION = "metergraphrelay automated logs export"
 PAGE_SIZE_MAX = 50000
 # Exactly the fields normalize_portkey_row consumes, drawn from the requested_data enum.
 REQUESTED_DATA = [
@@ -77,7 +87,7 @@ class PortkeyExportClient:
         """Call a Portkey API endpoint (relative path, base URL prepended, authed)."""
         url = f"{self._base}{path}"
         data = json.dumps(body).encode() if body is not None else None
-        headers = {_API_KEY_HEADER: self._api_key}
+        headers = {_API_KEY_HEADER: self._api_key, "User-Agent": USER_AGENT}
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -120,6 +130,7 @@ class PortkeyExportClient:
                 "current_page": 1,
             },
             "requested_data": list(REQUESTED_DATA),
+            "description": EXPORT_DESCRIPTION,
         }
         if self._workspace:
             body["workspace_id"] = self._workspace
@@ -190,8 +201,12 @@ class PortkeyExportClient:
     def _stream_to_file(
         self, signed_url: str, dest_path: str, on_progress: Callable[[], None] | None
     ) -> int:
-        # No Portkey credential header: the URL is pre-signed.
-        request = urllib.request.Request(signed_url, method="GET")
+        # No Portkey credential header: the URL is pre-signed. A harmless UA (name/
+        # version only, no secret) is sent for consistency and to avoid the same
+        # default-urllib-UA blocking seen on the API host.
+        request = urllib.request.Request(
+            signed_url, headers={"User-Agent": USER_AGENT}, method="GET"
+        )
         tmp_path = f"{dest_path}.part"
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:

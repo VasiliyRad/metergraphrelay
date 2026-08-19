@@ -4,12 +4,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from metergraphrelay import __version__ as PKG_VERSION
 from metergraphrelay.providers.portkey_export import (
     STATUS_SUCCESS,
     PortkeyExport,
     PortkeyExportClient,
     PortkeyExportError,
 )
+
+# The stable, explicit User-Agent must be derived from the package name/version
+# (live evidence: the Python-urllib default UA was blocked by Cloudflare 1010/403).
+EXPECTED_UA = f"metergraphrelay/{PKG_VERSION}"
 
 BASE = "https://api.portkey.example/v1"
 W_MIN = "2026-08-19T00:00:00+00:00"
@@ -321,3 +326,58 @@ def test_network_error_raises_portkey_export_error():
         mock.side_effect = urllib.error.URLError("connection refused")
         with pytest.raises(PortkeyExportError, match="connection refused"):
             _client().get_export("exp-1")
+
+
+# -- Portkey compatibility: explicit User-Agent + create-export description ----
+
+@pytest.mark.parametrize(
+    "invoke, resp_body",
+    [
+        (lambda c: c.create_export(window_start=W_MIN, window_end=W_MAX),
+         {"id": "exp-1", "total": 1}),
+        (lambda c: c.start_export("exp-1"), {"message": "ok"}),
+        (lambda c: c.get_export("exp-1"), {"id": "exp-1", "status": "success"}),
+        (lambda c: c.cancel_export("exp-1"), {"message": "ok"}),
+    ],
+    ids=["create", "start", "get", "cancel"],
+)
+def test_every_portkey_api_request_carries_package_user_agent(invoke, resp_body):
+    # Cloudflare rejected the default Python-urllib UA with HTTP 403 code 1010;
+    # every authed API request must send an explicit, package-derived User-Agent.
+    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(200, json.dumps(resp_body).encode())
+        invoke(_client())
+    assert mock.call_args_list  # a request was actually made
+    for call in mock.call_args_list:
+        request = call.args[0]
+        assert request.get_header("User-agent") == EXPECTED_UA
+
+
+def test_download_requests_carry_user_agent_and_signed_url_omits_credential(tmp_path):
+    dest = tmp_path / "raw.jsonl"
+    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+        mock.side_effect = _signed_ok([b'{"id":"r1"}\n'])
+        _client().download_to("exp-1", str(dest))
+
+    resolve_req = mock.call_args_list[0].args[0]  # authed API call to resolve signed URL
+    signed_req = mock.call_args_list[1].args[0]   # pre-signed storage fetch
+    assert resolve_req.get_header("User-agent") == EXPECTED_UA
+    # The signed fetch carries the same harmless UA (name/version only, no secret),
+    # deliberately consistent with the API calls, but never a Portkey credential.
+    assert signed_req.get_header("User-agent") == EXPECTED_UA
+    assert signed_req.get_header("X-portkey-api-key") is None
+
+
+def test_create_export_body_includes_nonsensitive_description():
+    # Portkey create-export returned AB01 until the body carried a `description`.
+    body = json.dumps({"id": "exp-1", "total": 1}).encode()
+    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+        mock.return_value = _resp(200, body)
+        _client().create_export(window_start=W_MIN, window_end=W_MAX)
+
+    sent = json.loads(mock.call_args.args[0].data)
+    description = sent["description"]
+    assert isinstance(description, str) and description.strip()
+    # It must never leak tenant/workspace identifiers or key material.
+    assert "ws-acme" not in description
+    assert "pk-secret" not in description

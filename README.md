@@ -215,7 +215,10 @@ this contacts Portkey) and pushes them to metergraph in one step. It is
 designed to run unattended from cron.
 
 **Setup:** in addition to `METERGRAPH_APP_TOKEN`, this mode requires
-`PORTKEY_API_KEY` (a secret) in `.env`:
+`PORTKEY_API_KEY` (a secret) in `.env`. The key must have the
+**`logs.export`** scope. Note that Portkey **Logs Export is currently an
+Enterprise-plan-only feature** — a key without that entitlement reaches
+the API but is rejected at authorization:
 
     METERGRAPH_APP_TOKEN=your-metergraph-token-here
     PORTKEY_API_KEY=pk-your-portkey-key-here
