@@ -8,6 +8,7 @@ def test_credential_specs_cover_all_targets():
         "openai": ["OPENAI_API_KEY"],
         "anthropic": ["ANTHROPIC_API_KEY"],
         "langfuse": ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
+        "braintrust": ["BRAINTRUST_API_KEY"],
         "portkey": ["PORTKEY_API_KEY"],
         "push": ["METERGRAPH_APP_TOKEN"],
     }

@@ -6,6 +6,7 @@ import pytest
 
 from metergraphrelay.cli import build_parser, main
 from metergraphrelay.portkey_sync import SyncOutcome
+from metergraphrelay.providers.braintrust import BraintrustAPIError
 from metergraphrelay.providers.langfuse import LangfuseAPIError
 
 
@@ -1032,3 +1033,290 @@ def test_docs_portkey_base_url_matches_client_default():
     assert "api.portkey.ai " not in readme
     assert "api.portkey.ai\n" not in env_example
     assert "api.portkey.ai " not in env_example
+
+
+def test_main_pull_braintrust_missing_credential_returns_error(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    exit_code = main(
+        ["pull", "braintrust", "--project", "p", "--env-file", str(env_file)]
+    )
+
+    assert exit_code == 1
+    assert "BRAINTRUST_API_KEY" in capsys.readouterr().err
+
+
+def test_main_pull_braintrust_requires_a_project():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "braintrust"])
+
+
+def test_main_pull_braintrust_dispatches_to_pull_braintrust(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt-key\n")
+    output_path = tmp_path / "out.jsonl"
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(5, 1)
+    ) as mock_pull:
+        exit_code = main(
+            [
+                "pull",
+                "braintrust",
+                "--env-file",
+                str(env_file),
+                "--project",
+                "proj-a",
+                "--project",
+                "proj-b",
+                "-n",
+                "5",
+                "--output",
+                str(output_path),
+                "--until",
+                "2026-09-01T00:00:00+00:00",
+            ]
+        )
+
+    assert exit_code == 0
+    mock_pull.assert_called_once_with(
+        base_url="https://api.braintrust.dev",
+        api_key="bt-key",
+        projects=["proj-a", "proj-b"],
+        count=5,
+        since=None,
+        until="2026-09-01T00:00:00+00:00",
+        route=None,
+        output_path=str(output_path),
+    )
+
+
+def test_main_pull_braintrust_credential_flag_overrides_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=from-env\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "braintrust",
+                "--project",
+                "p",
+                "--env-file",
+                str(env_file),
+                "--braintrust-api-key",
+                "from-flag",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["api_key"] == "from-flag"
+
+
+def test_main_pull_braintrust_base_url_from_env_file_resolves_with_credential_flag(
+    tmp_path,
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_BASE_URL=https://api-eu.braintrust.dev\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "braintrust",
+                "--project",
+                "p",
+                "--env-file",
+                str(env_file),
+                "--braintrust-api-key",
+                "bt-key",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["base_url"] == "https://api-eu.braintrust.dev"
+
+
+def test_main_pull_braintrust_base_url_flag_takes_precedence_over_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "BRAINTRUST_API_KEY=bt-key\nBRAINTRUST_BASE_URL=https://api-eu.braintrust.dev\n"
+    )
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as mock_pull:
+        main(
+            [
+                "pull",
+                "braintrust",
+                "--project",
+                "p",
+                "--env-file",
+                str(env_file),
+                "--base-url",
+                "https://braintrust.internal.example.com",
+            ]
+        )
+
+    assert mock_pull.call_args.kwargs["base_url"] == (
+        "https://braintrust.internal.example.com"
+    )
+
+
+def test_main_pull_braintrust_base_url_defaults_to_the_us_data_plane(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt-key\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as mock_pull:
+        main(["pull", "braintrust", "--project", "p", "--env-file", str(env_file)])
+
+    assert mock_pull.call_args.kwargs["base_url"] == "https://api.braintrust.dev"
+
+
+def test_main_pull_braintrust_until_defaults_to_command_start_time(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt-key\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as mock_pull:
+        main(["pull", "braintrust", "--project", "p", "--env-file", str(env_file)])
+
+    until = mock_pull.call_args.kwargs["until"]
+    parsed = datetime.fromisoformat(until)
+    assert parsed.tzinfo is not None
+
+
+def test_main_pull_braintrust_default_count_is_100(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt-key\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as mock_pull:
+        main(["pull", "braintrust", "--project", "p", "--env-file", str(env_file)])
+
+    assert mock_pull.call_args.kwargs["count"] == 100
+
+
+def test_main_pull_braintrust_prints_imported_and_skipped_summary(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt-key\n")
+
+    with patch("metergraphrelay.cli.pull_braintrust", return_value=(7, 2)):
+        exit_code = main(
+            [
+                "pull",
+                "braintrust",
+                "--project",
+                "p",
+                "--env-file",
+                str(env_file),
+                "--output",
+                "out.jsonl",
+            ]
+        )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Imported 7 span(s)" in out
+    assert "skipped 2" in out
+    assert "out.jsonl" in out
+
+
+def test_main_pull_braintrust_api_error_returns_clean_exit_code(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt-key\n")
+
+    with patch(
+        "metergraphrelay.cli.pull_braintrust",
+        side_effect=BraintrustAPIError("Braintrust API request failed: HTTP 401"),
+    ):
+        exit_code = main(
+            ["pull", "braintrust", "--project", "p", "--env-file", str(env_file)]
+        )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Error: ")
+    assert "401" in captured.err
+
+
+def test_pull_braintrust_help_documents_every_flag_and_default(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "braintrust", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+
+    for expected in [
+        "--project",
+        "by name or by project id",
+        "--count",
+        "default: 100",
+        "--since",
+        "no lower bound",
+        "--until",
+        "captured once",
+        "--route",
+        "Not a selector",
+        "--base-url",
+        "BRAINTRUST_BASE_URL",
+        "--output",
+        "./traces.jsonl",
+        "--env-file",
+        ".env",
+        "--braintrust-api-key",
+        "BRAINTRUST_API_KEY",
+    ]:
+        assert expected in help_text, f"missing {expected!r} in --help output"
+
+
+def test_pull_help_lists_braintrust_subcommand(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "--help"])
+
+    assert "braintrust" in capsys.readouterr().out
+
+
+def test_readme_pull_braintrust_examples_parse_successfully():
+    readme_text = (Path(__file__).parent.parent / "README.md").read_text()
+
+    assert (
+        "metergraphrelay pull braintrust --project my-project -n 25 "
+        "--output traces.jsonl"
+    ) in readme_text
+    assert (
+        "metergraphrelay pull braintrust --project my-project "
+        "--since 2026-08-01T00:00:00Z --until 2026-08-07T00:00:00Z"
+    ) in readme_text
+
+    build_parser().parse_args(
+        [
+            "pull",
+            "braintrust",
+            "--project",
+            "my-project",
+            "-n",
+            "25",
+            "--output",
+            "traces.jsonl",
+        ]
+    )
+    build_parser().parse_args(
+        [
+            "pull",
+            "braintrust",
+            "--project",
+            "my-project",
+            "--since",
+            "2026-08-01T00:00:00Z",
+            "--until",
+            "2026-08-07T00:00:00Z",
+        ]
+    )
