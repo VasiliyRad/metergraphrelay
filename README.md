@@ -66,6 +66,7 @@ Before enabling this in production:
     metergraphrelay demo openai --model gpt-4o-mini
     metergraphrelay push traces.jsonl
     metergraphrelay sync openai -n 25 --output my-traces.jsonl --route my-app/support-bot
+    metergraphrelay pull braintrust --project my-project -n 25 --output my-traces.jsonl
     metergraphrelay sync portkey export.jsonl --output converted.jsonl
 
 `sync openai` accepts the same flags as `pull openai`. It pulls to
@@ -75,7 +76,9 @@ instead of pulling data it can't push.
 
 `pull anthropic` accepts the same shape but isn't implemented yet — it
 checks for `ANTHROPIC_API_KEY` and reports accordingly. `pull langfuse`
-is implemented — see [Pull from Langfuse](#pull-from-langfuse) below.
+is implemented — see [Pull from Langfuse](#pull-from-langfuse) below —
+as is `pull braintrust`, see
+[Pull from Braintrust](#pull-from-braintrust).
 `sync portkey` runs in two modes: give it a local `EXPORT_FILE` to
 convert a Portkey export you downloaded yourself
 ([Sync from Portkey](#sync-from-portkey)), or omit the file to pull a
@@ -174,6 +177,90 @@ Langfuse into your local JSONL file, and from there into metergraph via
 without their content.
 
 Full flag reference: `metergraphrelay pull langfuse --help`.
+
+## Pull from Braintrust
+
+Import Braintrust **LLM spans** — the spans Braintrust marks with
+`span_attributes.type = 'llm'`, i.e. the model calls — into the same
+metergraph-native JSONL shape as `pull openai`. Only LLM spans are
+imported: `task`/`tool`/`function`/`eval`/`score`/`review` spans are
+application and eval structure, not model calls, and Braintrust
+scores/evals are never imported.
+
+This reads Braintrust's **`POST /btql`** query endpoint, the same
+endpoint the SQL sandbox and `bt sql` use, with a
+`FROM project_logs(..., shape => 'spans')` query per project.
+
+**Setup:** add your Braintrust API key to `.env`:
+
+    BRAINTRUST_API_KEY=...
+
+By default this talks to Braintrust's **US** data plane. For the EU data
+plane or a self-hosted deployment, set `BRAINTRUST_BASE_URL` in `.env`
+(or pass `--base-url` per-command):
+
+    BRAINTRUST_BASE_URL=https://api-eu.braintrust.dev
+
+**Quickstart:**
+
+    metergraphrelay pull braintrust --project my-project -n 25 --output traces.jsonl
+    metergraphrelay push traces.jsonl
+
+`--project` is **required** and repeatable. Each value may be a project
+**name or a project id** — Braintrust's `project_logs()` accepts either —
+and multiple projects are queried together in one pass.
+
+**Narrowing what gets pulled**, beyond `-n`/`--count`:
+
+    metergraphrelay pull braintrust --project my-project --since 2026-08-01T00:00:00Z --until 2026-08-07T00:00:00Z
+
+- `--since`/`--until` bound the span's `created` timestamp (`--since` is
+  inclusive, `--until` exclusive). `--until` defaults to the moment the
+  command started, captured once for the whole pull.
+- **Pass `--since` on anything but a small project.** Braintrust warns
+  that a `project_logs()` query with no lower time bound scans the
+  project's entire history, and `/btql` fails a query server-side at 30
+  seconds.
+- `--count` is always a cap on the number of **LLM spans** imported,
+  never a count of distinct traces. Results are paged through
+  Braintrust's cursor (`x-bt-cursor`), newest first.
+
+**Field mapping notes.**
+
+- `route` defaults to the LLM span's own name (e.g.
+  `"OpenAI Chat Completion"`), falling back to `braintrust/backfill`.
+  A Braintrust trace has no name of its own, and the root span that
+  would carry a workflow name is a different row this query doesn't
+  return. `--route` overrides it for every imported row, and the span
+  name is then preserved under `tags.name`.
+- Token counts come from Braintrust's normalized span metrics
+  (`prompt_tokens`, `completion_tokens`, `prompt_cached_tokens`,
+  `prompt_cache_creation_tokens`, `completion_reasoning_tokens`).
+  Braintrust's convention already matches metergraph's — `prompt_tokens`
+  is the **total**, with cache reads and writes as subsets of it — so
+  the counts are carried across unchanged.
+- `cost_usd` comes from Braintrust's `estimated_cost()`, which returns a
+  logged `metrics.estimated_cost` when there is one and otherwise
+  derives cost from token metrics and model-registry pricing.
+- `latency_ms` is derived from the span's `metrics.start`/`metrics.end`.
+- Braintrust span `tags` land under `tags.braintrust_tags`, and the
+  source project under `tags.braintrust_project_id`.
+
+**Before running this against your own data:** `pull braintrust`
+transfers every matched span's input/output content from Braintrust into
+your local JSONL file, and from there into metergraph via `push`, with
+no separate opt-in step — unlike `pull openai`'s `--include-content`
+flag, there is no way to pull Braintrust spans without their content.
+The query explicitly disables Braintrust's preview truncation so the
+content that arrives is the full logged content, not a clipped preview.
+
+There is no `sync braintrust` cron mode yet. Adding one would reuse the
+same server-owned lease machinery
+[`sync portkey`](#sync-from-portkey-api-cron-mode) already uses, plus
+one change on the metergraph server: adding `"braintrust"` to the
+import-sync source allowlist.
+
+Full flag reference: `metergraphrelay pull braintrust --help`.
 
 ## Sync from Portkey
 

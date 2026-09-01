@@ -13,6 +13,11 @@ from .config import ConfigError, require_credentials
 from .demo import run_demo
 from .metergraph_sync import MeterGraphSyncClient, MeterGraphSyncError
 from .portkey_sync import run_portkey_sync
+from .providers.braintrust import (
+    DEFAULT_BRAINTRUST_URL,
+    BraintrustAPIError,
+    pull_braintrust,
+)
 from .providers.langfuse import DEFAULT_LANGFUSE_HOST, LangfuseAPIError, pull_langfuse
 from .providers.openai import pull_openai
 from .providers.portkey import convert_portkey_export
@@ -170,6 +175,100 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    pull_braintrust_parser = pull_subparsers.add_parser(
+        "braintrust",
+        description=(
+            "Pull Braintrust LLM spans (span_attributes.type = 'llm') from one "
+            "or more projects into a local JSONL file shaped for metergraph's "
+            "ingest API. Reads Braintrust's POST /btql query endpoint. Only LLM "
+            "spans are imported: task/tool/function/eval spans, and scores/"
+            "evals, are never imported. WARNING: span input/output content is "
+            "transferred from Braintrust into the local output file, and from "
+            "there into metergraph via `push`, with no opt-in gate."
+        ),
+        help=(
+            "Pull LLM spans from Braintrust project logs (POST /btql); no "
+            "scores/evals, no non-LLM spans"
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "--project",
+        action="append",
+        required=True,
+        metavar="PROJECT",
+        help=(
+            "Braintrust project to read logs from, by name or by project id "
+            "(both are accepted). Repeatable: multiple --project values are "
+            "queried together. Required."
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "-n",
+        "--count",
+        type=int,
+        default=100,
+        help=(
+            "Maximum number of LLM spans to import (never a count of distinct "
+            "traces). (default: 100)"
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "Only import spans created at or after this ISO 8601 timestamp "
+            "(inclusive). Recommended: Braintrust warns that a project_logs "
+            "query without a lower time bound scans the whole project history. "
+            "(default: no lower bound)"
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "Only import spans created before this ISO 8601 timestamp "
+            "(exclusive). (default: the time this command started running, "
+            "captured once for the whole pull)"
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "--route",
+        default=None,
+        help=(
+            "Override the metergraph route field for every imported row. "
+            "(default: the LLM span's own name, else braintrust/backfill) Not "
+            "a selector — see --project for choosing what is pulled."
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "--base-url",
+        default=None,
+        help=(
+            "Braintrust API base URL. (default: $BRAINTRUST_BASE_URL if set, "
+            "else the US data plane; the EU data plane is "
+            "https://api-eu.braintrust.dev)"
+        ),
+    )
+    pull_braintrust_parser.add_argument(
+        "--output",
+        default="./traces.jsonl",
+        help="Path to write the resulting JSONL file. (default: ./traces.jsonl)",
+    )
+    pull_braintrust_parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Path to a .env file to load credentials from. (default: .env)",
+    )
+    pull_braintrust_parser.add_argument(
+        "--braintrust-api-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Braintrust API key (Bearer token). Overrides $BRAINTRUST_API_KEY "
+            "/ .env if given; env/.env is the preferred path."
+        ),
+    )
+
     sync_parser = subparsers.add_parser(
         "sync",
         help="Pull trace data from a provider and push it to metergraph in one step",
@@ -319,6 +418,17 @@ def _resolve_langfuse_credentials(args: argparse.Namespace) -> tuple[str, str]:
         return args.langfuse_public_key, args.langfuse_secret_key
     creds = require_credentials("langfuse", args.env_file)
     return creds["LANGFUSE_PUBLIC_KEY"], creds["LANGFUSE_SECRET_KEY"]
+
+
+def _resolve_braintrust_credential(args: argparse.Namespace) -> str:
+    # Load the selected --env-file unconditionally, even when --braintrust-api-key
+    # is given and the file's own credential goes unused — other settings (e.g.
+    # BRAINTRUST_BASE_URL) may live only in that file, not the real process
+    # environment, and must still resolve.
+    load_dotenv(args.env_file, override=True)
+    if args.braintrust_api_key:
+        return args.braintrust_api_key
+    return require_credentials("braintrust", args.env_file)["BRAINTRUST_API_KEY"]
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:
@@ -511,6 +621,35 @@ def _run_pull_langfuse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_pull_braintrust(args: argparse.Namespace) -> int:
+    try:
+        api_key = _resolve_braintrust_credential(args)
+    except ConfigError as exc:
+        return _config_error(exc)
+    base_url = (
+        args.base_url
+        or os.environ.get("BRAINTRUST_BASE_URL")
+        or DEFAULT_BRAINTRUST_URL
+    )
+    until = args.until or datetime.now(timezone.utc).isoformat()
+    try:
+        imported, skipped = pull_braintrust(
+            base_url=base_url,
+            api_key=api_key,
+            projects=args.project,
+            count=args.count,
+            since=args.since,
+            until=until,
+            route=args.route,
+            output_path=args.output,
+        )
+    except (BraintrustAPIError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Imported {imported} span(s), skipped {skipped}, to {args.output}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -524,6 +663,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pull" and args.provider == "langfuse":
         return _run_pull_langfuse(args)
+
+    if args.command == "pull" and args.provider == "braintrust":
+        return _run_pull_braintrust(args)
 
     if args.command == "pull" and args.provider == "openai":
         try:
