@@ -9,6 +9,7 @@ import urllib.request
 from typing import Any
 
 from .. import __version__
+from ..window import normalize_utc_designator
 
 # Braintrust's US data plane. The EU plane (https://api-eu.braintrust.dev) and a
 # self-hosted deployment's universal API URL are reachable via --base-url /
@@ -487,7 +488,14 @@ def normalize_span(span: dict[str, Any], *, route_override: str | None) -> dict:
     )
 
     return {
-        "ts": span["created"],
+        # Braintrust's documented `created` carries an explicit `+00:00` offset,
+        # but a `Z` designator would be parsed by `datetime.fromisoformat` only
+        # on Python 3.11+; a 3.10 consumer (the OSS server supports 3.10) fails
+        # the parse and silently substitutes ingest time. Normalizing the
+        # designator here keeps a historical timestamp historical everywhere.
+        # A non-string `created` raises AttributeError, which the caller's skip
+        # path reports rather than forwarding an unusable timestamp.
+        "ts": normalize_utc_designator(span["created"]),
         "source": "braintrust",
         "sdk": "metergraphrelay",
         "sdk_version": __version__,

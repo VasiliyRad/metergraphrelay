@@ -388,3 +388,32 @@ Full flag reference: `metergraphrelay sync portkey --help`.
     cd metergraphrelay
     pip install -e ".[dev]"
     pytest
+
+### End-to-end checks against a real server
+
+`tests/e2e/` holds contract checks that `pytest` does not run: they need a
+live metergraph server, and they assert on what survives ingest rather than
+on what the relay writes to disk. CI runs both against the OSS server (see
+the `latest-relay-latest-server` job).
+
+To run them locally, start the OSS server — Postgres plus one process,
+migrations run on startup:
+
+    docker compose up            # in a metergraph OSS checkout
+    pip install -e . -e ../metergraph/server
+
+    MG_URL=http://127.0.0.1:8787 MG_TOKEN=dev-token python tests/e2e/oss_server_timestamp.py
+    MG_URL=http://127.0.0.1:8787 MG_TOKEN=dev-token python tests/e2e/oss_server_braintrust.py
+
+`oss_server_braintrust.py` drives the real `pull braintrust` loop against a
+stubbed `/btql` page, so it needs no Braintrust credential. To *also* run one
+real query against a live Braintrust workspace — the only way to confirm the
+query itself is accepted — add:
+
+    BRAINTRUST_API_KEY=... BRAINTRUST_E2E_PROJECT=my-project \
+      BRAINTRUST_E2E_SINCE=2026-08-01T00:00:00Z \
+      MG_URL=http://127.0.0.1:8787 MG_TOKEN=dev-token \
+      python tests/e2e/oss_server_braintrust.py
+
+That live section is skipped whenever `BRAINTRUST_E2E_PROJECT` is unset, and
+never runs in CI.

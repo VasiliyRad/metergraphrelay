@@ -813,3 +813,24 @@ def test_extract_output_serializes_a_message_whose_blocks_are_all_unrecognized()
     text, calls = _extract_output(message)
     assert json.loads(text) == message
     assert calls is None
+
+
+def test_normalize_span_rewrites_a_z_designator_to_an_explicit_offset():
+    # Python 3.10's datetime.fromisoformat rejects "Z"; a consumer on that
+    # version would otherwise silently substitute ingest time.
+    row = normalize_span(
+        make_span(created="2026-08-05T12:00:00Z"), route_override=None
+    )
+    assert row["ts"] == "2026-08-05T12:00:00+00:00"
+
+
+def test_normalize_span_leaves_an_explicit_offset_unchanged():
+    row = normalize_span(
+        make_span(created="2026-08-05T12:00:00+02:00"), route_override=None
+    )
+    assert row["ts"] == "2026-08-05T12:00:00+02:00"
+
+
+def test_normalize_span_rejects_a_non_string_created():
+    with pytest.raises(AttributeError):
+        normalize_span(make_span(created=1754395200), route_override=None)

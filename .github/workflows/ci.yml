@@ -57,3 +57,8 @@ jobs:
         env:
           MG_URL: http://localhost:8787
           MG_TOKEN: ci-token
+      - name: Preserve Braintrust span mapping through ingest and API
+        run: python tests/e2e/oss_server_braintrust.py
+        env:
+          MG_URL: http://localhost:8787
+          MG_TOKEN: ci-token
