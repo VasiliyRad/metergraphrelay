@@ -732,6 +732,9 @@ def test_normalize_observation_full_row():
         "status": "success",
         "input_tokens": 12,
         "output_tokens": 34,
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+        "reasoning_tokens": None,
         "cost_usd": 0.0012,
         "error": False,
         "error_type": None,
@@ -1289,3 +1292,68 @@ def test_pull_langfuse_treats_json_dumps_failure_as_malformed_row_skip(
     assert skipped == 1
     captured = capsys.readouterr()
     assert "obs-bad" in captured.err
+
+
+# Langfuse's usageDetails shape depends on which integration recorded the
+# observation. Reading "input"/"output" alone loses tokens on two of the three.
+
+
+def test_usage_details_from_the_openai_wrapper_are_not_dropped():
+    """The openai wrapper stores raw OpenAI names, so there is no "input" key.
+
+    Before this was handled, every observation recorded through Langfuse's
+    OpenAI wrapper imported with null token counts.
+    """
+    observation = make_observation(
+        usageDetails={
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 80},
+            "completion_tokens_details": {"reasoning_tokens": 5},
+        }
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    # Nested details are already excluded from the parent totals upstream, so
+    # these pass through unchanged.
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 20
+    assert row["cache_read_tokens"] == 80
+    assert row["reasoning_tokens"] == 5
+
+
+def test_flattened_usage_details_add_subtracted_detail_tokens_back():
+    """The langchain handler subtracts each detail from its parent.
+
+    Langfuse stores input=20 for a 100-token prompt with 80 cached. metergraph
+    treats input_tokens as the total with cache_read as a subset, so the detail
+    is added back; otherwise every cached call under-reports its input.
+    """
+    observation = make_observation(
+        usageDetails={
+            "input": 20,
+            "output": 15,
+            "input_cached_tokens": 80,
+            "output_reasoning_tokens": 5,
+        }
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 20
+    assert row["cache_read_tokens"] == 80
+    assert row["reasoning_tokens"] == 5
+
+
+def test_usage_details_without_any_detail_keys_are_unchanged():
+    observation = make_observation(usageDetails={"input": 12, "output": 34})
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 12
+    assert row["output_tokens"] == 34
+    assert row["cache_read_tokens"] is None
+    assert row["reasoning_tokens"] is None

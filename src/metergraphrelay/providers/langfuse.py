@@ -252,6 +252,96 @@ def _response_text(output_value: Any) -> str | None:
     return json.dumps(output_value)
 
 
+# Langfuse's usageDetails shape depends on which integration recorded the
+# observation, so reading "input"/"output" alone silently loses tokens:
+#
+#   openai wrapper  -- raw OpenAI names (prompt_tokens, completion_tokens) with
+#                      a NESTED prompt_tokens_details dict. No "input" key at
+#                      all, so a naive read yields null token counts.
+#   langchain       -- flattened input/output plus sibling input_*/output_*
+#                      detail keys, and each detail is SUBTRACTED from its
+#                      parent, so "input" is prompt tokens MINUS cached ones.
+#   native SDK      -- whatever the caller passed to update(usage_details=...).
+#
+# metergraph's convention is that input_tokens is the total and cache_read /
+# reasoning are subsets of it, so the flattened shape has its details added
+# back while the nested shape is already a total.
+_INPUT_TOTAL_KEYS = ("input", "prompt_tokens", "promptTokenCount")
+_OUTPUT_TOTAL_KEYS = ("output", "completion_tokens", "candidatesTokenCount")
+_CACHE_READ_KEYS = ("input_cached_tokens", "cache_read_input_tokens")
+_CACHE_WRITE_KEYS = ("input_cache_creation_tokens", "cache_creation_input_tokens")
+_REASONING_KEYS = ("output_reasoning_tokens", "thoughts_token_count")
+
+
+def _first_int(source: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _nested_detail(usage_details: dict[str, Any], parent: str, key: str) -> int | None:
+    details = usage_details.get(parent)
+    if not isinstance(details, dict):
+        return None
+    value = details.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def map_usage_details(usage_details: Any) -> dict[str, int | None]:
+    """Map one observation's usageDetails onto metergraph token fields."""
+    if not isinstance(usage_details, dict):
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+            "reasoning_tokens": None,
+        }
+
+    cache_read = _first_int(usage_details, _CACHE_READ_KEYS)
+    if cache_read is None:
+        cache_read = _nested_detail(usage_details, "prompt_tokens_details", "cached_tokens")
+    cache_write = _first_int(usage_details, _CACHE_WRITE_KEYS)
+    reasoning = _first_int(usage_details, _REASONING_KEYS)
+    if reasoning is None:
+        reasoning = _nested_detail(
+            usage_details, "completion_tokens_details", "reasoning_tokens"
+        )
+
+    input_tokens = _first_int(usage_details, _INPUT_TOTAL_KEYS)
+    output_tokens = _first_int(usage_details, _OUTPUT_TOTAL_KEYS)
+
+    # Flattened (langchain) shape only: add the subtracted details back so
+    # input_tokens is the total. The nested shape keeps its details inside
+    # *_details dicts, which are never siblings, so it is left alone.
+    if input_tokens is not None:
+        input_tokens += sum(
+            value
+            for key, value in usage_details.items()
+            if key.startswith("input_")
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        )
+    if output_tokens is not None:
+        output_tokens += sum(
+            value
+            for key, value in usage_details.items()
+            if key.startswith("output_")
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        )
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "reasoning_tokens": reasoning,
+    }
+
+
 def normalize_observation(
     observation: dict[str, Any], *, route_override: str | None
 ) -> dict:
@@ -279,8 +369,7 @@ def normalize_observation(
         raw_status_message if error and isinstance(raw_status_message, str) else None
     )
 
-    raw_usage_details = observation.get("usageDetails")
-    usage_details = raw_usage_details if isinstance(raw_usage_details, dict) else {}
+    usage = map_usage_details(observation.get("usageDetails"))
     request_json, request_text = _map_content(observation.get("input"))
     response_text = _response_text(observation.get("output"))
 
@@ -294,8 +383,11 @@ def normalize_observation(
         "provider": infer_provider(observation),
         "model": model,
         "status": "error" if error else "success",
-        "input_tokens": usage_details.get("input"),
-        "output_tokens": usage_details.get("output"),
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "cache_read_tokens": usage["cache_read_tokens"],
+        "cache_write_tokens": usage["cache_write_tokens"],
+        "reasoning_tokens": usage["reasoning_tokens"],
         "cost_usd": observation.get("totalCost"),
         "error": error,
         "error_type": error_type,
