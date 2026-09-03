@@ -11,6 +11,8 @@ ENV_VARS_READ_BY_CLI = sorted(
         "METERGRAPH_INGEST_URL",
         "LANGFUSE_BASE_URL",
         "BRAINTRUST_BASE_URL",
+        "PHOENIX_BASE_URL",
+        "PHOENIX_API_KEY",
         "PORTKEY_WORKSPACE",
         "PORTKEY_BASE_URL",
     }
