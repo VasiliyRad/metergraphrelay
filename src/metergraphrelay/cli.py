@@ -13,6 +13,7 @@ from .config import ConfigError, require_credentials
 from .demo import run_demo
 from .metergraph_sync import MeterGraphSyncClient, MeterGraphSyncError
 from .portkey_sync import run_portkey_sync
+from .provider_sync import UNBOUNDED_COUNT, run_pull_sync
 from .providers.braintrust import (
     DEFAULT_BRAINTRUST_URL,
     BraintrustAPIError,
@@ -478,6 +479,138 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # --- sync langfuse / braintrust / phoenix: server-coordinated cron mode ---
+    # One shape for the three cursor-paged providers. The server picks the
+    # window and holds the lease, so these take no --since/--until/--count: a
+    # run imports exactly one server-issued window and advances the checkpoint
+    # only when every row of it uploads.
+    sync_langfuse_parser = sync_subparsers.add_parser(
+        "langfuse",
+        description=(
+            "Sync Langfuse GENERATION observations to metergraph in server-"
+            "coordinated cron mode: pull one logical time window (at most one "
+            "hour) from the Langfuse Observations API and push it, with "
+            "acquire/resume/complete owned by the metergraph import-sync "
+            "server. Safe to run from cron, idempotent, no local checkpoint "
+            "files. Requires LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and "
+            "METERGRAPH_APP_TOKEN. --source-scope names the Langfuse project "
+            "on the metergraph side (default: the public key, which identifies "
+            "the project and is not a secret). --initial-since seeds only the "
+            "first run. Observation content is uploaded with no opt-out."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Sync Langfuse generations to metergraph (server-coordinated cron mode)",
+    )
+    _add_sync_common(sync_langfuse_parser, scope_help=(
+        "Identifier for this Langfuse project on the metergraph side "
+        "(default: the Langfuse public key, which is not a secret)."
+    ))
+    sync_langfuse_parser.add_argument(
+        "--trace-name", action="append", default=None, metavar="TRACE_NAME",
+        help="Only sync generations whose trace has this name. Repeatable (OR).",
+    )
+    sync_langfuse_parser.add_argument(
+        "--tag", action="append", default=None, metavar="TAG",
+        help="Only sync generations whose trace carries this tag. Repeatable (AND).",
+    )
+    sync_langfuse_parser.add_argument(
+        "--environment", default=None,
+        help="Only sync generations from this Langfuse environment.",
+    )
+    sync_langfuse_parser.add_argument(
+        "--base-url", default=None,
+        help=(
+            "Langfuse API base URL. (default: $LANGFUSE_BASE_URL if set, else "
+            f"{DEFAULT_LANGFUSE_HOST})"
+        ),
+    )
+    sync_langfuse_parser.add_argument(
+        "--langfuse-public-key", default=None, metavar="KEY",
+        help="Langfuse public key. Overrides $LANGFUSE_PUBLIC_KEY / .env if given.",
+    )
+    sync_langfuse_parser.add_argument(
+        "--langfuse-secret-key", default=None, metavar="KEY",
+        help="Langfuse secret key. Overrides $LANGFUSE_SECRET_KEY / .env if given.",
+    )
+
+    sync_braintrust_parser = sync_subparsers.add_parser(
+        "braintrust",
+        description=(
+            "Sync Braintrust LLM spans (span_attributes.type = 'llm') to "
+            "metergraph in server-coordinated cron mode: pull one logical time "
+            "window (at most one hour) from POST /btql and push it, with "
+            "acquire/resume/complete owned by the metergraph import-sync "
+            "server. Safe to run from cron, idempotent, no local checkpoint "
+            "files. Requires BRAINTRUST_API_KEY and METERGRAPH_APP_TOKEN. "
+            "--source-scope defaults to the --project list. --initial-since "
+            "seeds only the first run. Span content is uploaded with no opt-out."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Sync Braintrust LLM spans to metergraph (server-coordinated cron mode)",
+    )
+    _add_sync_common(sync_braintrust_parser, scope_help=(
+        "Identifier for this Braintrust project set on the metergraph side "
+        "(default: the --project values joined with commas)."
+    ))
+    sync_braintrust_parser.add_argument(
+        "--project", action="append", required=True, metavar="PROJECT",
+        help="Braintrust project, by name or id. Repeatable. Required.",
+    )
+    sync_braintrust_parser.add_argument(
+        "--base-url", default=None,
+        help=(
+            "Braintrust API base URL. (default: $BRAINTRUST_BASE_URL if set, "
+            "else the US data plane)"
+        ),
+    )
+    sync_braintrust_parser.add_argument(
+        "--braintrust-api-key", default=None, metavar="KEY",
+        help="Braintrust API key. Overrides $BRAINTRUST_API_KEY / .env if given.",
+    )
+
+    sync_phoenix_parser = sync_subparsers.add_parser(
+        "phoenix",
+        description=(
+            "Sync Arize Phoenix LLM spans (span_kind = LLM) to metergraph in "
+            "server-coordinated cron mode: pull one logical time window (at "
+            "most one hour) from GET /v1/projects/{project}/spans and push it, "
+            "with acquire/resume/complete owned by the metergraph import-sync "
+            "server. Safe to run from cron, idempotent, no local checkpoint "
+            "files. Requires METERGRAPH_APP_TOKEN; a local Phoenix needs no "
+            "credential. --source-scope defaults to the --project list. "
+            "--initial-since seeds only the first run. Span content is "
+            "uploaded with no opt-out."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Sync Phoenix LLM spans to metergraph (server-coordinated cron mode)",
+    )
+    _add_sync_common(sync_phoenix_parser, scope_help=(
+        "Identifier for this Phoenix project set on the metergraph side "
+        "(default: the --project values joined with commas)."
+    ))
+    sync_phoenix_parser.add_argument(
+        "--project", action="append", required=True, metavar="PROJECT",
+        help="Phoenix project, by name or id. Repeatable. Required.",
+    )
+    sync_phoenix_parser.add_argument(
+        "--name", action="append", default=None, metavar="SPAN_NAME",
+        help="Only sync spans with this name. Repeatable (OR).",
+    )
+    sync_phoenix_parser.add_argument(
+        "--base-url", default=None,
+        help=(
+            "Phoenix server base URL. (default: $PHOENIX_BASE_URL if set, else "
+            f"{DEFAULT_PHOENIX_URL})"
+        ),
+    )
+    sync_phoenix_parser.add_argument(
+        "--phoenix-api-key", default=None, metavar="KEY",
+        help=(
+            "Phoenix API key, only when the server has authentication enabled. "
+            "Overrides $PHOENIX_API_KEY / .env if given."
+        ),
+    )
+
     demo_parser = subparsers.add_parser(
         "demo", help="Run 1-2 demo conversations with store=True"
     )
@@ -493,6 +626,36 @@ def build_parser() -> argparse.ArgumentParser:
     push_parser.add_argument("--env-file", default=".env")
 
     return parser
+
+
+def _add_sync_common(parser: argparse.ArgumentParser, *, scope_help: str) -> None:
+    """Flags shared by the server-coordinated sync commands."""
+    parser.add_argument("--source-scope", default=None, help=scope_help)
+    parser.add_argument(
+        "--initial-since",
+        default=None,
+        help=(
+            "Aware ISO 8601 timestamp seeding the first sync window. Required "
+            "only on the very first run; the server ignores it once state "
+            "exists, so cron may pass it every run."
+        ),
+    )
+    parser.add_argument(
+        "--max-window-seconds",
+        type=int,
+        default=None,
+        help="Maximum logical window length in seconds (1-3600). (default: 3600)",
+    )
+    parser.add_argument(
+        "--route",
+        default=None,
+        help="Override the metergraph route field for every synced row.",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Path to a .env file to load credentials from. (default: .env)",
+    )
 
 
 def _config_error(exc: ConfigError) -> int:
@@ -755,6 +918,147 @@ def _run_pull_braintrust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sync_window_settings(args: argparse.Namespace) -> tuple[int, str | None]:
+    """Validate the shared sync flags; returns (max_window_seconds, initial_since)."""
+    if args.initial_since is not None:
+        _validate_initial_since(args.initial_since)
+    max_window = args.max_window_seconds if args.max_window_seconds is not None else 3600
+    if max_window <= 0 or max_window > 3600:
+        raise ConfigError("--max-window-seconds must be between 1 and 3600.")
+    return max_window, args.initial_since
+
+
+def _run_sync_pull(args: argparse.Namespace, *, source: str, source_scope: str,
+                   pull_window, provider_errors: tuple[type[Exception], ...],
+                   push_token: str) -> int:
+    """Drive one server-coordinated window for a cursor-paged provider."""
+    ingest_base = os.environ.get("METERGRAPH_INGEST_URL")
+    mg_client = MeterGraphSyncClient(ingest_base or DEFAULT_INGEST_URL, push_token)
+    try:
+        max_window, initial_since = _sync_window_settings(args)
+    except ConfigError as exc:
+        return _config_error(exc)
+    try:
+        outcome = run_pull_sync(
+            mg_client=mg_client,
+            source=source,
+            source_scope=source_scope,
+            pull_window=pull_window,
+            initial_since=initial_since,
+            max_window_seconds=max_window,
+            push_token=push_token,
+            ingest_base_url=ingest_base,
+            provider_errors=provider_errors,
+        )
+    except (MeterGraphSyncError, OSError, *provider_errors) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(outcome.detail)
+    return outcome.exit_code
+
+
+def _run_sync_langfuse(args: argparse.Namespace) -> int:
+    try:
+        public_key, secret_key = _resolve_langfuse_credentials(args)
+        push_creds = require_credentials("push", args.env_file)
+    except ConfigError as exc:
+        return _config_error(exc)
+    base_url = (
+        args.base_url or os.environ.get("LANGFUSE_BASE_URL") or DEFAULT_LANGFUSE_HOST
+    )
+    # The public key identifies the Langfuse project and is designed to ship in
+    # client-side code, so it is a safe default scope; the secret never is.
+    source_scope = args.source_scope or public_key
+
+    def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
+        return pull_langfuse(
+            base_url=base_url,
+            public_key=public_key,
+            secret_key=secret_key,
+            count=UNBOUNDED_COUNT,
+            since=window_start,
+            until=window_end,
+            trace_names=args.trace_name or [],
+            tags=args.tag or [],
+            environment=args.environment,
+            route=args.route,
+            output_path=output_path,
+            import_context=import_context,
+            on_progress=on_progress,
+        )
+
+    return _run_sync_pull(
+        args, source="langfuse", source_scope=source_scope, pull_window=pull_window,
+        provider_errors=(LangfuseAPIError,), push_token=push_creds["METERGRAPH_APP_TOKEN"],
+    )
+
+
+def _run_sync_braintrust(args: argparse.Namespace) -> int:
+    try:
+        api_key = _resolve_braintrust_credential(args)
+        push_creds = require_credentials("push", args.env_file)
+    except ConfigError as exc:
+        return _config_error(exc)
+    base_url = (
+        args.base_url
+        or os.environ.get("BRAINTRUST_BASE_URL")
+        or DEFAULT_BRAINTRUST_URL
+    )
+    source_scope = args.source_scope or ",".join(args.project)
+
+    def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
+        return pull_braintrust(
+            base_url=base_url,
+            api_key=api_key,
+            projects=args.project,
+            count=UNBOUNDED_COUNT,
+            since=window_start,
+            until=window_end,
+            route=args.route,
+            output_path=output_path,
+            import_context=import_context,
+            on_progress=on_progress,
+        )
+
+    return _run_sync_pull(
+        args, source="braintrust", source_scope=source_scope, pull_window=pull_window,
+        provider_errors=(BraintrustAPIError,), push_token=push_creds["METERGRAPH_APP_TOKEN"],
+    )
+
+
+def _run_sync_phoenix(args: argparse.Namespace) -> int:
+    try:
+        push_creds = require_credentials("push", args.env_file)
+    except ConfigError as exc:
+        return _config_error(exc)
+    # require_credentials() has loaded the env file; optional settings follow.
+    api_key = args.phoenix_api_key or os.environ.get("PHOENIX_API_KEY") or None
+    base_url = (
+        args.base_url or os.environ.get("PHOENIX_BASE_URL") or DEFAULT_PHOENIX_URL
+    )
+    source_scope = args.source_scope or ",".join(args.project)
+
+    def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
+        return pull_phoenix(
+            base_url=base_url,
+            api_key=api_key,
+            projects=args.project,
+            count=UNBOUNDED_COUNT,
+            since=window_start,
+            until=window_end,
+            names=args.name or [],
+            route=args.route,
+            output_path=output_path,
+            import_context=import_context,
+            on_progress=on_progress,
+        )
+
+    return _run_sync_pull(
+        args, source="phoenix", source_scope=source_scope, pull_window=pull_window,
+        provider_errors=(PhoenixAPIError,), push_token=push_creds["METERGRAPH_APP_TOKEN"],
+    )
+
+
 def _run_pull_phoenix(args: argparse.Namespace) -> int:
     # Phoenix needs no credential by default (a local server has auth off), so
     # the .env file is loaded for its optional settings rather than through
@@ -803,6 +1107,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pull" and args.provider == "phoenix":
         return _run_pull_phoenix(args)
+
+    if args.command == "sync" and args.provider == "langfuse":
+        return _run_sync_langfuse(args)
+
+    if args.command == "sync" and args.provider == "braintrust":
+        return _run_sync_braintrust(args)
+
+    if args.command == "sync" and args.provider == "phoenix":
+        return _run_sync_phoenix(args)
 
     if args.command == "pull" and args.provider == "openai":
         try:

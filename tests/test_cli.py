@@ -1465,3 +1465,191 @@ def test_main_pull_phoenix_prints_imported_and_skipped_summary(tmp_path, capsys)
 
     assert exit_code == 0
     assert "Imported 7 span(s), skipped 2" in capsys.readouterr().out
+
+
+# --- sync langfuse / braintrust / phoenix (server-coordinated cron mode) ------
+
+
+def _completed_outcome():
+    return SyncOutcome("completed", "Imported window w: pushed 2 row(s), skipped 0, 0 failed.", 0, pushed=2)
+
+
+def test_sync_langfuse_requires_provider_credentials(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
+    assert main(["sync", "langfuse", "--env-file", str(env_file)]) == 1
+    assert "LANGFUSE_PUBLIC_KEY" in capsys.readouterr().err
+
+
+def test_sync_langfuse_requires_push_token(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk\nLANGFUSE_SECRET_KEY=sk\n")
+    assert main(["sync", "langfuse", "--env-file", str(env_file)]) == 1
+    assert "METERGRAPH_APP_TOKEN" in capsys.readouterr().err
+
+
+def test_sync_langfuse_dispatches_with_public_key_as_default_scope(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-lf-1\nLANGFUSE_SECRET_KEY=sk-lf-1\n"
+        "METERGRAPH_APP_TOKEN=tok-123\nMETERGRAPH_INGEST_URL=http://localhost:8080\n"
+    )
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run, patch(
+        "metergraphrelay.cli.pull_langfuse", return_value=(2, 0)
+    ) as pull:
+        exit_code = main(
+            [
+                "sync", "langfuse", "--env-file", str(env_file),
+                "--initial-since", "2026-08-01T00:00:00Z",
+                "--max-window-seconds", "1800",
+                "--trace-name", "support-desk/triage", "--tag", "prod",
+            ]
+        )
+
+        assert exit_code == 0
+        kwargs = run.call_args.kwargs
+        # The pull closure hands the server's window to the provider verbatim,
+        # unbounded in count, with the import context and progress hook attached.
+        ctx = object()
+        tick = object()
+        kwargs["pull_window"](
+            window_start="2026-08-19T00:00:00+00:00", window_end="2026-08-19T01:00:00+00:00",
+            output_path="/tmp/x.jsonl", import_context=ctx, on_progress=tick,
+        )
+        pulled = pull.call_args.kwargs
+
+    assert "pushed 2" in capsys.readouterr().out
+    assert kwargs["source"] == "langfuse"
+    assert kwargs["source_scope"] == "pk-lf-1"
+    assert kwargs["initial_since"] == "2026-08-01T00:00:00Z"
+    assert kwargs["max_window_seconds"] == 1800
+    assert kwargs["push_token"] == "tok-123"
+    assert kwargs["ingest_base_url"] == "http://localhost:8080"
+    assert kwargs["provider_errors"] == (LangfuseAPIError,)
+    assert pulled["since"] == "2026-08-19T00:00:00+00:00"
+    assert pulled["until"] == "2026-08-19T01:00:00+00:00"
+    assert pulled["count"] >= 1_000_000
+    assert pulled["trace_names"] == ["support-desk/triage"]
+    assert pulled["tags"] == ["prod"]
+    assert pulled["import_context"] is ctx
+    assert pulled["on_progress"] is tick
+    assert pulled["public_key"] == "pk-lf-1"
+
+
+def test_sync_langfuse_source_scope_flag_overrides_default(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk-lf-1\nLANGFUSE_SECRET_KEY=sk-lf-1\nMETERGRAPH_APP_TOKEN=tok\n"
+    )
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run:
+        main(["sync", "langfuse", "--env-file", str(env_file), "--source-scope", "team-a"])
+    assert run.call_args.kwargs["source_scope"] == "team-a"
+
+
+def test_sync_braintrust_dispatches_with_projects_as_default_scope(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("BRAINTRUST_API_KEY=bt\nMETERGRAPH_APP_TOKEN=tok\n")
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run, patch(
+        "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
+    ) as pull:
+        exit_code = main(
+            [
+                "sync", "braintrust", "--env-file", str(env_file),
+                "--project", "proj-a", "--project", "proj-b", "--route", "r",
+            ]
+        )
+        assert exit_code == 0
+        kwargs = run.call_args.kwargs
+        kwargs["pull_window"](
+            window_start="s", window_end="e", output_path="o", import_context=None, on_progress=None
+        )
+        pulled = pull.call_args.kwargs
+    assert kwargs["source"] == "braintrust"
+    assert kwargs["source_scope"] == "proj-a,proj-b"
+    assert kwargs["max_window_seconds"] == 3600
+    assert kwargs["initial_since"] is None
+    assert kwargs["provider_errors"] == (BraintrustAPIError,)
+    assert pulled["projects"] == ["proj-a", "proj-b"]
+    assert (pulled["since"], pulled["until"], pulled["route"]) == ("s", "e", "r")
+    assert pulled["api_key"] == "bt"
+    assert pulled["base_url"] == "https://api.braintrust.dev"
+
+
+def test_sync_braintrust_requires_a_project():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sync", "braintrust"])
+
+
+def test_sync_phoenix_needs_only_the_push_token(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p"]) == 1
+    assert "METERGRAPH_APP_TOKEN" in capsys.readouterr().err
+
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok\nPHOENIX_BASE_URL=http://px:6006\n")
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run, patch(
+        "metergraphrelay.cli.pull_phoenix", return_value=(0, 0)
+    ) as pull:
+        exit_code = main(
+            ["sync", "phoenix", "--env-file", str(env_file), "--project", "mgsample",
+             "--name", "support-desk/triage"]
+        )
+        assert exit_code == 0
+        kwargs = run.call_args.kwargs
+        kwargs["pull_window"](
+            window_start="s", window_end="e", output_path="o", import_context=None, on_progress=None
+        )
+        pulled = pull.call_args.kwargs
+    assert kwargs["source"] == "phoenix"
+    assert kwargs["source_scope"] == "mgsample"
+    assert kwargs["provider_errors"] == (PhoenixAPIError,)
+    assert pulled["base_url"] == "http://px:6006"
+    assert pulled["api_key"] is None
+    assert pulled["names"] == ["support-desk/triage"]
+
+
+@pytest.mark.parametrize("provider,extra", [
+    ("langfuse", []),
+    ("braintrust", ["--project", "p"]),
+    ("phoenix", ["--project", "p"]),
+])
+def test_sync_pull_providers_validate_shared_window_flags(tmp_path, capsys, provider, extra):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LANGFUSE_PUBLIC_KEY=pk\nLANGFUSE_SECRET_KEY=sk\nBRAINTRUST_API_KEY=bt\n"
+        "METERGRAPH_APP_TOKEN=tok\n"
+    )
+    with patch("metergraphrelay.cli.run_pull_sync") as run:
+        assert main(["sync", provider, "--env-file", str(env_file), *extra,
+                     "--max-window-seconds", "7200"]) == 1
+        assert "between 1 and 3600" in capsys.readouterr().err
+        assert main(["sync", provider, "--env-file", str(env_file), *extra,
+                     "--initial-since", "2026-08-01T00:00:00"]) == 1
+        assert "timezone-aware" in capsys.readouterr().err
+        run.assert_not_called()
+
+
+def test_sync_pull_provider_failed_outcome_returns_nonzero(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
+    outcome = SyncOutcome("failed", "Sync failed: boom; lease released.", 1)
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=outcome):
+        assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p"]) == 1
+    assert "lease released" in capsys.readouterr().out
+
+
+def test_sync_pull_provider_busy_exits_zero(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
+    outcome = SyncOutcome("busy", "Another sync holds the lease; retry at t.", 0)
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=outcome):
+        assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p"]) == 0
+    assert "retry at" in capsys.readouterr().out
+
+
+def test_sync_help_lists_every_provider(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["sync", "--help"])
+    out = capsys.readouterr().out
+    for name in ("openai", "portkey", "langfuse", "braintrust", "phoenix"):
+        assert name in out
