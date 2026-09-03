@@ -67,6 +67,7 @@ Before enabling this in production:
     metergraphrelay push traces.jsonl
     metergraphrelay sync openai -n 25 --output my-traces.jsonl --route my-app/support-bot
     metergraphrelay pull braintrust --project my-project -n 25 --output my-traces.jsonl
+    metergraphrelay pull phoenix --project my-project -n 25 --output my-traces.jsonl
     metergraphrelay sync portkey export.jsonl --output converted.jsonl
 
 `sync openai` accepts the same flags as `pull openai`. It pulls to
@@ -78,7 +79,8 @@ instead of pulling data it can't push.
 checks for `ANTHROPIC_API_KEY` and reports accordingly. `pull langfuse`
 is implemented — see [Pull from Langfuse](#pull-from-langfuse) below —
 as is `pull braintrust`, see
-[Pull from Braintrust](#pull-from-braintrust).
+[Pull from Braintrust](#pull-from-braintrust), and `pull phoenix`, see
+[Pull from Arize Phoenix](#pull-from-arize-phoenix).
 `sync portkey` runs in two modes: give it a local `EXPORT_FILE` to
 convert a Portkey export you downloaded yourself
 ([Sync from Portkey](#sync-from-portkey)), or omit the file to pull a
@@ -261,6 +263,78 @@ one change on the metergraph server: adding `"braintrust"` to the
 import-sync source allowlist.
 
 Full flag reference: `metergraphrelay pull braintrust --help`.
+
+## Pull from Arize Phoenix
+
+Import Phoenix **LLM spans** — the OpenInference spans with
+`span_kind = LLM`, i.e. the model calls — into the same metergraph-native
+JSONL shape as `pull openai`. Only LLM spans are imported:
+`CHAIN`/`TOOL`/`RETRIEVER`/`AGENT` spans are application structure, not
+model calls, and Phoenix annotations and evals are never imported.
+
+This reads Phoenix's **`GET /v1/projects/{project}/spans`** endpoint with
+cursor pagination, so it needs a Phoenix server new enough to serve it
+(Phoenix 11+; the `arizephoenix/phoenix` image does).
+
+**Setup:** nothing, for a local Phoenix. The default base URL is
+`http://localhost:6006`. For a remote or authenticated Phoenix, set these
+in `.env` (or pass `--base-url` / `--phoenix-api-key` per-command):
+
+    PHOENIX_BASE_URL=https://phoenix.example.com
+    PHOENIX_API_KEY=...
+
+**Quickstart:**
+
+    metergraphrelay pull phoenix --project my-project -n 25 --output traces.jsonl
+    metergraphrelay push traces.jsonl
+
+`--project` is **required** and repeatable. Each value may be a project
+**name or id**; projects are read in the order given and share one
+`--count` cap.
+
+**Narrowing what gets pulled**, beyond `-n`/`--count`:
+
+    metergraphrelay pull phoenix --project my-project --since 2026-08-01T00:00:00Z --until 2026-08-07T00:00:00Z
+    metergraphrelay pull phoenix --project my-project --name support-desk/triage --name support-desk/draft-reply
+
+- `--since`/`--until` bound the span's start time (`--since` inclusive,
+  `--until` exclusive). `--until` defaults to the moment the command
+  started, captured once for the whole pull.
+- `--name` matches the span name. Repeatable; multiple values are **OR'd**.
+- `--count` is always a cap on the number of **LLM spans** imported, never
+  a count of distinct traces. Results are newest first.
+
+**Field mapping notes.**
+
+- `route` is resolved from the most specific source on the span: the
+  `metergraph.route` attribute, then `gen_ai.operation.name`, then the
+  span's **own name**, then `phoenix/backfill`. A stock OpenInference
+  instrumentor sets neither attribute and names the span after the SDK
+  method (`ChatCompletion`), so live auto-instrumented traffic lands on
+  that name; pass `--route` to override every imported row, and the span
+  name is then preserved under `tags.name`.
+- Token counts come from the `llm.token_count.*` attributes (`prompt`,
+  `completion`, `prompt_details.cache_read`, `prompt_details.cache_write`,
+  `completion_details.reasoning`). OpenInference's `prompt` is already the
+  **total** with cache reads as a subset, matching metergraph's convention,
+  so the counts are carried across unchanged.
+- `latency_ms` is derived from the span's start and end time.
+- `cost_usd` is left empty: the spans endpoint does not return Phoenix's
+  computed cost, and metergraph prices the row from its own catalog.
+- Prompt and response come from the flattened `llm.input_messages.*` /
+  `llm.output_messages.*` attributes, falling back to `input.value` /
+  `output.value`. Tool call names land under `tool_names`.
+- The source project lands under `tags.phoenix_project`.
+
+**Before running this against your own data:** `pull phoenix` transfers
+every matched span's input/output content from Phoenix into your local
+JSONL file, and from there into metergraph via `push`, with no separate
+opt-in step — unlike `pull openai`'s `--include-content` flag, there is no
+way to pull Phoenix spans without their content.
+
+There is no `sync phoenix` cron mode yet.
+
+Full flag reference: `metergraphrelay pull phoenix --help`.
 
 ## Sync from Portkey
 

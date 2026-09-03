@@ -19,6 +19,7 @@ from .providers.braintrust import (
     pull_braintrust,
 )
 from .providers.langfuse import DEFAULT_LANGFUSE_HOST, LangfuseAPIError, pull_langfuse
+from .providers.phoenix import DEFAULT_PHOENIX_URL, PhoenixAPIError, pull_phoenix
 from .providers.openai import pull_openai
 from .providers.portkey import convert_portkey_export
 from .providers.portkey_export import PortkeyExportClient, PortkeyExportError
@@ -266,6 +267,110 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Braintrust API key (Bearer token). Overrides $BRAINTRUST_API_KEY "
             "/ .env if given; env/.env is the preferred path."
+        ),
+    )
+
+    pull_phoenix_parser = pull_subparsers.add_parser(
+        "phoenix",
+        description=(
+            "Pull Arize Phoenix LLM spans (OpenInference span_kind = LLM) from "
+            "one or more projects into a local JSONL file shaped for "
+            "metergraph's ingest API. Reads Phoenix's "
+            "GET /v1/projects/{project}/spans endpoint. Only LLM spans are "
+            "imported: CHAIN/TOOL/RETRIEVER/AGENT spans, annotations and evals "
+            "are never imported. WARNING: span input/output content is "
+            "transferred from Phoenix into the local output file, and from "
+            "there into metergraph via `push`, with no opt-in gate."
+        ),
+        help=(
+            "Pull LLM spans from Arize Phoenix projects "
+            "(GET /v1/projects/{project}/spans); no annotations, no non-LLM spans"
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--project",
+        action="append",
+        required=True,
+        metavar="PROJECT",
+        help=(
+            "Phoenix project to read spans from, by name or by project id "
+            "(both are accepted). Repeatable: projects are read in order and "
+            "share one --count cap. Required."
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "-n",
+        "--count",
+        type=int,
+        default=100,
+        help=(
+            "Maximum number of LLM spans to import (never a count of distinct "
+            "traces). (default: 100)"
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "Only import spans that started at or after this ISO 8601 "
+            "timestamp (inclusive). (default: no lower bound)"
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--until",
+        default=None,
+        help=(
+            "Only import spans that started before this ISO 8601 timestamp "
+            "(exclusive). (default: the time this command started running, "
+            "captured once for the whole pull)"
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--name",
+        action="append",
+        default=None,
+        metavar="SPAN_NAME",
+        help=(
+            "Only import spans with this name. Repeatable; multiple values are "
+            "OR'd. (default: every LLM span)"
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--route",
+        default=None,
+        help=(
+            "Override the metergraph route field for every imported row. "
+            "(default: the span's metergraph.route or gen_ai.operation.name "
+            "attribute, else its own name, else phoenix/backfill) Not a "
+            "selector — see --name and --project for choosing what is pulled."
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--base-url",
+        default=None,
+        help=(
+            "Phoenix server base URL. (default: $PHOENIX_BASE_URL if set, else "
+            f"{DEFAULT_PHOENIX_URL})"
+        ),
+    )
+    pull_phoenix_parser.add_argument(
+        "--output",
+        default="./traces.jsonl",
+        help="Path to write the resulting JSONL file. (default: ./traces.jsonl)",
+    )
+    pull_phoenix_parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Path to a .env file to load settings from. (default: .env)",
+    )
+    pull_phoenix_parser.add_argument(
+        "--phoenix-api-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Phoenix API key (Bearer token), only needed when the server has "
+            "authentication enabled. Overrides $PHOENIX_API_KEY / .env if "
+            "given. (default: none)"
         ),
     )
 
@@ -650,6 +755,35 @@ def _run_pull_braintrust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_pull_phoenix(args: argparse.Namespace) -> int:
+    # Phoenix needs no credential by default (a local server has auth off), so
+    # the .env file is loaded for its optional settings rather than through
+    # require_credentials, which would fail on a missing key.
+    load_dotenv(args.env_file, override=True)
+    api_key = args.phoenix_api_key or os.environ.get("PHOENIX_API_KEY") or None
+    base_url = (
+        args.base_url or os.environ.get("PHOENIX_BASE_URL") or DEFAULT_PHOENIX_URL
+    )
+    until = args.until or datetime.now(timezone.utc).isoformat()
+    try:
+        imported, skipped = pull_phoenix(
+            base_url=base_url,
+            api_key=api_key,
+            projects=args.project,
+            count=args.count,
+            since=args.since,
+            until=until,
+            names=args.name or [],
+            route=args.route,
+            output_path=args.output,
+        )
+    except (PhoenixAPIError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Imported {imported} span(s), skipped {skipped}, to {args.output}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -666,6 +800,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pull" and args.provider == "braintrust":
         return _run_pull_braintrust(args)
+
+    if args.command == "pull" and args.provider == "phoenix":
+        return _run_pull_phoenix(args)
 
     if args.command == "pull" and args.provider == "openai":
         try:
