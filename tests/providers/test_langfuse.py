@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from metergraphrelay import __version__
+from metergraphrelay.import_identity import ImportContext, ImportIdentityError
 from metergraphrelay.providers.langfuse import (
     PAGE_LIMIT,
     LangfuseAPIError,
@@ -1438,3 +1439,31 @@ def test_usage_details_without_any_detail_keys_are_unchanged():
     assert row["output_tokens"] == 34
     assert row["cache_read_tokens"] is None
     assert row["reasoning_tokens"] is None
+
+
+def test_normalize_observation_with_import_context_adds_dedup_identity():
+    row = normalize_observation(
+        make_observation(id=" obs-9 "),
+        route_override=None,
+        import_context=ImportContext(source="langfuse", source_scope="pk-lf-1"),
+    )
+    assert row["import_source"] == "langfuse"
+    assert row["import_source_scope"] == "pk-lf-1"
+    assert row["import_event_id"] == "obs-9"
+
+
+def test_normalize_observation_without_import_context_omits_identity():
+    row = normalize_observation(make_observation(), route_override=None)
+    assert not {"import_source", "import_source_scope", "import_event_id"} & row.keys()
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", 12, None, "x" * 513])
+def test_normalize_observation_rejects_an_unusable_import_event_id(bad_id):
+    # A ValueError, never one of the types the pull loop skips past: an
+    # invalid identity must fail the window, not silently drop the row.
+    with pytest.raises(ImportIdentityError):
+        normalize_observation(
+            make_observation(id=bad_id),
+            route_override=None,
+            import_context=ImportContext(source="langfuse", source_scope="s"),
+        )

@@ -11,7 +11,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
-from .portkey import ImportContext
+from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 OBSERVATIONS_PATH = "/api/public/v2/observations"
@@ -422,7 +422,7 @@ def normalize_observation(
         # counting.
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
-        row["import_event_id"] = observation["id"]
+        row["import_event_id"] = canonical_import_event_id(observation.get("id"))
     return row
 
 

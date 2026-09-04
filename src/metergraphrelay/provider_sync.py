@@ -19,8 +19,12 @@ Exit behaviour matches ``sync portkey``: ``busy`` and ``caught_up`` are clean
 no-op exits (0); a handled failure releases the lease and exits nonzero; a
 lease lost mid-run exits nonzero without a release (there is nothing left to
 release); a process crash performs no cleanup and the server's lease expiry
-is the backstop. A window advances only when every row uploads cleanly: any
-failed row releases the lease so the same window is retried next run.
+is the backstop. A window advances only when every row uploads cleanly: a
+failed upload, a row the provider could not normalize, or a row without a
+valid import identity all release the lease so the same window is retried
+next run. ``allow_skipped`` opts a run into advancing past rows the
+provider skipped as malformed, for a window that would otherwise stay
+pending forever; the skipped count is still reported.
 
 Unlike Portkey there is no draft/poll/split phase. A provider page is fetched
 on demand, so a large window costs more pages rather than a bigger export, and
@@ -36,7 +40,7 @@ from typing import Callable, Protocol
 
 from .metergraph_sync import LeaseLostError, MeterGraphSyncError
 from .portkey_sync import RENEW_INTERVAL_SECONDS, SyncOutcome, _LeaseRenewer
-from .providers.portkey import ImportContext
+from .import_identity import ImportContext, ImportIdentityError
 from .push import push_file
 
 SYNC_SOURCES = ("langfuse", "braintrust", "phoenix")
@@ -70,6 +74,7 @@ def run_pull_sync(
     push_token: str,
     ingest_base_url: str | None,
     provider_errors: tuple[type[Exception], ...] = (),
+    allow_skipped: bool = False,
     work_dir: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     renew_interval_seconds: float = RENEW_INTERVAL_SECONDS,
@@ -122,6 +127,19 @@ def run_pull_sync(
                 on_progress=renewer.tick,
             )
             renewer.force()  # pull done — force before the row-by-row upload
+            if skipped and not allow_skipped:
+                # In sync mode there is no export file to recover a skipped row
+                # from: once the checkpoint advances it is gone. Leave the
+                # window pending unless the caller accepted that.
+                _safe_abandon(mg_client, lease.lease_id)
+                return SyncOutcome(
+                    "failed",
+                    f"{skipped} row(s) in window {lease.window_start}.."
+                    f"{lease.window_end} could not be normalized (see warnings "
+                    "above); lease released and the window left pending. Fix the "
+                    "rows, or pass --allow-skipped to advance past them.",
+                    1, pushed=0, failed=0, skipped=skipped,
+                )
             pushed = failed = 0
             if imported:
                 pushed, failed = push(
@@ -150,9 +168,15 @@ def run_pull_sync(
         return SyncOutcome(
             "failed", f"Lease lost mid-run ({exc}); relying on server lease expiry.", 1
         )
-    except (MeterGraphSyncError, OSError, *provider_errors) as exc:
+    except (MeterGraphSyncError, OSError, ImportIdentityError, *provider_errors) as exc:
         _safe_abandon(mg_client, lease.lease_id)
         return SyncOutcome("failed", f"Sync failed: {exc}; lease released.", 1)
+    except Exception:
+        # Anything unforeseen still propagates as a traceback, but never with
+        # the lease held: the next run must not sit on "busy" for 15 minutes
+        # because of a bug here.
+        _safe_abandon(mg_client, lease.lease_id)
+        raise
 
 
 def _safe_abandon(mg_client, lease_id: str) -> None:

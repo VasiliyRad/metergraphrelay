@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from .. import __version__
 from ..window import normalize_utc_designator
-from .portkey import ImportContext
+from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_PHOENIX_URL = "http://localhost:6006"
 SPANS_PATH_TEMPLATE = "/v1/projects/{project}/spans"
@@ -394,7 +394,7 @@ def normalize_span(
         # span, so an overlap re-pull deduplicates on the server.
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
-        row["import_event_id"] = span_id
+        row["import_event_id"] = canonical_import_event_id(span_id)
     return row
 
 
