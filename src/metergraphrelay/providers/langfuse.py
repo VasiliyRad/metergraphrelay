@@ -252,41 +252,83 @@ def _response_text(output_value: Any) -> str | None:
     return json.dumps(output_value)
 
 
-# Langfuse's usageDetails shape depends on which integration recorded the
-# observation, so reading "input"/"output" alone silently loses tokens:
+# Langfuse stores usageDetails FLAT: its ingestion normalizes provider usage
+# into one level of integer buckets and drops nested objects. Which keys appear
+# depends on the integration that recorded the observation:
 #
-#   openai wrapper  -- raw OpenAI names (prompt_tokens, completion_tokens) with
-#                      a NESTED prompt_tokens_details dict. No "input" key at
-#                      all, so a naive read yields null token counts.
-#   langchain       -- flattened input/output plus sibling input_*/output_*
-#                      detail keys, and each detail is SUBTRACTED from its
-#                      parent, so "input" is prompt tokens MINUS cached ones.
-#   native SDK      -- whatever the caller passed to update(usage_details=...).
+#   openai wrapper   -- ingestion renames prompt/completion to "input"/"output"
+#                       and flattens details as input_cached_tokens /
+#                       output_reasoning_tokens, each SUBTRACTED from its parent.
+#   langchain        -- the callback handler flattens usage_metadata details as
+#                       input_cache_read / input_cache_creation /
+#                       output_reasoning, likewise subtracted.
+#   gateway fallthrough -- a response the wrapper schema rejects keeps the raw
+#                       prompt_tokens / completion_tokens, inclusive totals with
+#                       the details dropped.
+#   native SDK       -- whatever the caller passed to update(usage_details=...),
+#                       e.g. Anthropic's input_tokens + cache_read_input_tokens.
+#   gemini           -- promptTokenCount / candidatesTokenCount / thoughts_token_count.
 #
-# metergraph's convention is that input_tokens is the total and cache_read /
-# reasoning are subsets of it, so the flattened shape has its details added
-# back while the nested shape is already a total.
-_INPUT_TOTAL_KEYS = ("input", "prompt_tokens", "promptTokenCount")
-_OUTPUT_TOTAL_KEYS = ("output", "completion_tokens", "candidatesTokenCount")
-_CACHE_READ_KEYS = ("input_cached_tokens", "cache_read_input_tokens")
-_CACHE_WRITE_KEYS = ("input_cache_creation_tokens", "cache_creation_input_tokens")
-_REASONING_KEYS = ("output_reasoning_tokens", "thoughts_token_count")
+# Langfuse's own contract is that every key is a non-overlapping bucket and the
+# total is their sum. metergraph's convention is that input_tokens is the total
+# with cache_read / cache_write / reasoning as subsets of it, so the named total
+# key has every other *input* bucket added back (Langfuse itself sums by the
+# "input" substring). Priority-tier buckets are pricing markers that overlap
+# the parent, not exclusive sub-buckets, so they are left out of the sum.
+_INPUT_TOTAL_KEYS = (
+    "input", "input_tokens", "prompt_tokens", "promptTokenCount", "prompt_token_count",
+)
+_OUTPUT_TOTAL_KEYS = (
+    "output", "output_tokens", "completion_tokens", "candidatesTokenCount",
+    "candidates_token_count",
+)
+_CACHE_READ_KEYS = (
+    "input_cached_tokens", "input_cache_read", "cache_read_input_tokens",
+    "cachedContentTokenCount", "cached_content_token_count",
+)
+_CACHE_WRITE_KEYS = (
+    "input_cache_creation_tokens", "input_cache_creation", "cache_creation_input_tokens",
+)
+_REASONING_KEYS = (
+    "output_reasoning_tokens", "output_reasoning", "thoughtsTokenCount",
+    "thoughts_token_count",
+)
+_NON_BUCKET_MARKERS = ("priority",)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _first_int_key(source: dict[str, Any], keys: tuple[str, ...]) -> tuple[str | None, int | None]:
+    for key in keys:
+        value = source.get(key)
+        if _is_int(value):
+            return key, value
+    return None, None
 
 
 def _first_int(source: dict[str, Any], keys: tuple[str, ...]) -> int | None:
-    for key in keys:
-        value = source.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-    return None
+    return _first_int_key(source, keys)[1]
 
 
-def _nested_detail(usage_details: dict[str, Any], parent: str, key: str) -> int | None:
-    details = usage_details.get(parent)
-    if not isinstance(details, dict):
+def _total_with_buckets(
+    usage_details: dict[str, Any], total_keys: tuple[str, ...], marker: str
+) -> int | None:
+    """The named total plus every other integer bucket carrying ``marker``."""
+    total_key, total = _first_int_key(usage_details, total_keys)
+    if total_key is None:
         return None
-    value = details.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    for key, value in usage_details.items():
+        if key == total_key or not _is_int(value):
+            continue
+        lowered = key.lower()
+        if marker not in lowered:
+            continue
+        if any(skip in lowered for skip in _NON_BUCKET_MARKERS):
+            continue
+        total += value
+    return total
 
 
 def map_usage_details(usage_details: Any) -> dict[str, int | None]:
@@ -299,46 +341,12 @@ def map_usage_details(usage_details: Any) -> dict[str, int | None]:
             "cache_write_tokens": None,
             "reasoning_tokens": None,
         }
-
-    cache_read = _first_int(usage_details, _CACHE_READ_KEYS)
-    if cache_read is None:
-        cache_read = _nested_detail(usage_details, "prompt_tokens_details", "cached_tokens")
-    cache_write = _first_int(usage_details, _CACHE_WRITE_KEYS)
-    reasoning = _first_int(usage_details, _REASONING_KEYS)
-    if reasoning is None:
-        reasoning = _nested_detail(
-            usage_details, "completion_tokens_details", "reasoning_tokens"
-        )
-
-    input_tokens = _first_int(usage_details, _INPUT_TOTAL_KEYS)
-    output_tokens = _first_int(usage_details, _OUTPUT_TOTAL_KEYS)
-
-    # Flattened (langchain) shape only: add the subtracted details back so
-    # input_tokens is the total. The nested shape keeps its details inside
-    # *_details dicts, which are never siblings, so it is left alone.
-    if input_tokens is not None:
-        input_tokens += sum(
-            value
-            for key, value in usage_details.items()
-            if key.startswith("input_")
-            and isinstance(value, int)
-            and not isinstance(value, bool)
-        )
-    if output_tokens is not None:
-        output_tokens += sum(
-            value
-            for key, value in usage_details.items()
-            if key.startswith("output_")
-            and isinstance(value, int)
-            and not isinstance(value, bool)
-        )
-
     return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_tokens": cache_read,
-        "cache_write_tokens": cache_write,
-        "reasoning_tokens": reasoning,
+        "input_tokens": _total_with_buckets(usage_details, _INPUT_TOTAL_KEYS, "input"),
+        "output_tokens": _total_with_buckets(usage_details, _OUTPUT_TOTAL_KEYS, "output"),
+        "cache_read_tokens": _first_int(usage_details, _CACHE_READ_KEYS),
+        "cache_write_tokens": _first_int(usage_details, _CACHE_WRITE_KEYS),
+        "reasoning_tokens": _first_int(usage_details, _REASONING_KEYS),
     }
 
 
