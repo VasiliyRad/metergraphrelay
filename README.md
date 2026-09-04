@@ -69,9 +69,9 @@ Before enabling this in production:
     metergraphrelay pull braintrust --project my-project -n 25 --output my-traces.jsonl
     metergraphrelay pull phoenix --project my-project -n 25 --output my-traces.jsonl
     metergraphrelay sync portkey export.jsonl --output converted.jsonl
-    metergraphrelay sync langfuse --initial-since 2026-08-01T00:00:00+00:00 --tag prod
-    metergraphrelay sync braintrust --initial-since 2026-08-01T00:00:00+00:00 --project my-project
-    metergraphrelay sync phoenix --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    metergraphrelay sync langfuse --source-scope support-bot-prod --initial-since 2026-08-01T00:00:00+00:00 --tag prod
+    metergraphrelay sync braintrust --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    metergraphrelay sync phoenix --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
 
 `sync openai` accepts the same flags as `pull openai`. It pulls to
 `--output` and immediately pushes that same file, checking both
@@ -474,9 +474,9 @@ server**: it tracks the checkpoint, applies the 5-minute overlap, and holds a
 15-minute renewable lease per run. The relay keeps no local files, so the
 same cron line is safe from several machines.
 
-    metergraphrelay sync langfuse   --initial-since 2026-08-01T00:00:00+00:00 --tag prod
-    metergraphrelay sync braintrust --initial-since 2026-08-01T00:00:00+00:00 --project my-project
-    metergraphrelay sync phoenix    --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    metergraphrelay sync langfuse   --source-scope support-bot-prod --initial-since 2026-08-01T00:00:00+00:00 --tag prod
+    metergraphrelay sync braintrust --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    metergraphrelay sync phoenix    --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
 
 Each takes the selectors of its `pull` counterpart (`--trace-name`/`--tag`/
 `--environment`, `--project`, `--name`) plus `--route`, but **no
@@ -489,12 +489,13 @@ row in it must land before the checkpoint advances.
 `METERGRAPH_APP_TOKEN`. `METERGRAPH_INGEST_URL` points every call at a
 self-hosted server.
 
-**`--source-scope`** names the checkpoint on the server, one per
-`(source, scope)`. It defaults to something stable and non-secret: the
-Langfuse public key (it identifies the project and is designed to ship in
-client code), or the comma-joined `--project` list for Braintrust and
-Phoenix. Pass it explicitly when the same project should be tracked as two
-separate streams (for example one cron per Langfuse tag).
+**`--source-scope`** is required. It names the checkpoint on the server,
+one per `(source, scope)`, and the server deduplicates on it too, so it
+has to stay stable for the life of the stream: use a label such as the
+project name, never a credential or a flag list that might rotate or be
+reordered. Two crons over the same project with different selectors (say
+`--tag prod` and `--tag staging`) must use two scopes; on one scope they
+would share a checkpoint and each would drop the other's rows.
 
 **Dedup.** Every synced row carries `import_source`, `import_source_scope`
 and `import_event_id` (the Langfuse observation id, the Braintrust row id,
@@ -504,21 +505,26 @@ identity, so a `pull` followed by a `sync` over the same range does count
 twice.
 
 **Exit behavior, windows, and failures** follow Portkey's: `busy` and
-`caught_up` exit 0; a failed row releases the lease and exits nonzero with
-the same window pending; a lost lease exits nonzero immediately and later
+`caught_up` exit 0 and print to stdout; every failure exits nonzero and
+prints its reason to stderr with an `Error:` prefix, so a cron line that
+silences stdout still mails the reason. A failed row releases the lease
+with the same window pending; a lost lease exits immediately and later
 runs see `busy` until the server expires it. Two checks are stricter than
 `pull`: a row the provider cannot normalize leaves the window pending (pass
 `--allow-skipped` to advance past it, since in sync mode there is no export
 file to recover it from), and a row whose provider id cannot serve as an
 import identity fails the window before anything uploads. There is no
 volume split: a large window simply pages further, and a progress hook fired
-per imported row renews the lease as it goes.
+per page fetch and per row (imported or skipped) renews the lease as it
+goes. A failure names the phase it happened in (pull, push or complete)
+and, when rows had already reached the server, says they will be re-sent
+and deduplicated.
 
 **Cron example** — hourly, one line per source:
 
-    0 * * * * metergraphrelay sync langfuse   --initial-since 2026-08-01T00:00:00+00:00 --tag prod
-    5 * * * * metergraphrelay sync braintrust --initial-since 2026-08-01T00:00:00+00:00 --project my-project
-    10 * * * * metergraphrelay sync phoenix   --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    0 * * * * metergraphrelay sync langfuse   --source-scope support-bot-prod --initial-since 2026-08-01T00:00:00+00:00 --tag prod
+    5 * * * * metergraphrelay sync braintrust --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    10 * * * * metergraphrelay sync phoenix   --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
 
 The server must allowlist the source: metergraph servers at or after
 migration `0072_import_sync_sources` accept `langfuse`, `braintrust` and

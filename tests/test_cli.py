@@ -978,7 +978,7 @@ def test_sync_portkey_api_failed_outcome_returns_nonzero(tmp_path, capsys):
         exit_code = main(["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file)])
 
     assert exit_code == 1
-    assert "Portkey export failed." in capsys.readouterr().out
+    assert "Error: Portkey export failed." in capsys.readouterr().err
 
 
 def test_sync_portkey_api_busy_prints_and_exits_zero(tmp_path, capsys):
@@ -1488,7 +1488,7 @@ def test_sync_langfuse_requires_push_token(tmp_path, capsys):
     assert "METERGRAPH_APP_TOKEN" in capsys.readouterr().err
 
 
-def test_sync_langfuse_dispatches_with_public_key_as_default_scope(tmp_path, capsys):
+def test_sync_langfuse_dispatches_with_an_explicit_scope(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "LANGFUSE_PUBLIC_KEY=pk-lf-1\nLANGFUSE_SECRET_KEY=sk-lf-1\n"
@@ -1500,6 +1500,7 @@ def test_sync_langfuse_dispatches_with_public_key_as_default_scope(tmp_path, cap
         exit_code = main(
             [
                 "sync", "langfuse", "--env-file", str(env_file),
+                "--source-scope", "support-bot-prod",
                 "--initial-since", "2026-08-01T00:00:00Z",
                 "--max-window-seconds", "1800",
                 "--trace-name", "support-desk/triage", "--tag", "prod",
@@ -1520,7 +1521,7 @@ def test_sync_langfuse_dispatches_with_public_key_as_default_scope(tmp_path, cap
 
     assert "pushed 2" in capsys.readouterr().out
     assert kwargs["source"] == "langfuse"
-    assert kwargs["source_scope"] == "pk-lf-1"
+    assert kwargs["source_scope"] == "support-bot-prod"
     assert kwargs["initial_since"] == "2026-08-01T00:00:00Z"
     assert kwargs["max_window_seconds"] == 1800
     assert kwargs["push_token"] == "tok-123"
@@ -1537,17 +1538,28 @@ def test_sync_langfuse_dispatches_with_public_key_as_default_scope(tmp_path, cap
     assert pulled["public_key"] == "pk-lf-1"
 
 
-def test_sync_langfuse_source_scope_flag_overrides_default(tmp_path):
+@pytest.mark.parametrize("provider,extra", [
+    ("langfuse", []),
+    ("braintrust", ["--project", "p"]),
+    ("phoenix", ["--project", "p"]),
+])
+def test_sync_requires_an_explicit_source_scope(tmp_path, capsys, provider, extra):
+    # A derived default (public key, project list) would silently start a new
+    # checkpoint on key rotation or a reordered flag; the scope must be chosen.
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "LANGFUSE_PUBLIC_KEY=pk-lf-1\nLANGFUSE_SECRET_KEY=sk-lf-1\nMETERGRAPH_APP_TOKEN=tok\n"
+        "LANGFUSE_PUBLIC_KEY=pk\nLANGFUSE_SECRET_KEY=sk\nBRAINTRUST_API_KEY=bt\n"
+        "METERGRAPH_APP_TOKEN=tok\n"
     )
-    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run:
-        main(["sync", "langfuse", "--env-file", str(env_file), "--source-scope", "team-a"])
-    assert run.call_args.kwargs["source_scope"] == "team-a"
+    with patch("metergraphrelay.cli.run_pull_sync") as run:
+        assert main(["sync", provider, "--env-file", str(env_file), *extra]) == 1
+        assert "--source-scope is required" in capsys.readouterr().err
+        assert main(["sync", provider, "--env-file", str(env_file), *extra,
+                     "--source-scope", "  "]) == 1
+        run.assert_not_called()
 
 
-def test_sync_braintrust_dispatches_with_projects_as_default_scope(tmp_path):
+def test_sync_braintrust_dispatches_with_an_explicit_scope(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("BRAINTRUST_API_KEY=bt\nMETERGRAPH_APP_TOKEN=tok\n")
     with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run, patch(
@@ -1556,6 +1568,7 @@ def test_sync_braintrust_dispatches_with_projects_as_default_scope(tmp_path):
         exit_code = main(
             [
                 "sync", "braintrust", "--env-file", str(env_file),
+                "--source-scope", "acme-logs",
                 "--project", "proj-a", "--project", "proj-b", "--route", "r",
             ]
         )
@@ -1566,7 +1579,7 @@ def test_sync_braintrust_dispatches_with_projects_as_default_scope(tmp_path):
         )
         pulled = pull.call_args.kwargs
     assert kwargs["source"] == "braintrust"
-    assert kwargs["source_scope"] == "proj-a,proj-b"
+    assert kwargs["source_scope"] == "acme-logs"
     assert kwargs["max_window_seconds"] == 3600
     assert kwargs["initial_since"] is None
     assert kwargs["provider_errors"] == (BraintrustAPIError,)
@@ -1584,7 +1597,8 @@ def test_sync_braintrust_requires_a_project():
 def test_sync_phoenix_needs_only_the_push_token(tmp_path, capsys):
     env_file = tmp_path / ".env"
     env_file.write_text("")
-    assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p"]) == 1
+    assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p",
+                 "--source-scope", "p"]) == 1
     assert "METERGRAPH_APP_TOKEN" in capsys.readouterr().err
 
     env_file.write_text("METERGRAPH_APP_TOKEN=tok\nPHOENIX_BASE_URL=http://px:6006\n")
@@ -1593,7 +1607,7 @@ def test_sync_phoenix_needs_only_the_push_token(tmp_path, capsys):
     ) as pull:
         exit_code = main(
             ["sync", "phoenix", "--env-file", str(env_file), "--project", "mgsample",
-             "--name", "support-desk/triage"]
+             "--source-scope", "mgsample", "--name", "support-desk/triage"]
         )
         assert exit_code == 0
         kwargs = run.call_args.kwargs
@@ -1610,9 +1624,9 @@ def test_sync_phoenix_needs_only_the_push_token(tmp_path, capsys):
 
 
 @pytest.mark.parametrize("provider,extra", [
-    ("langfuse", []),
-    ("braintrust", ["--project", "p"]),
-    ("phoenix", ["--project", "p"]),
+    ("langfuse", ["--source-scope", "s"]),
+    ("braintrust", ["--project", "p", "--source-scope", "s"]),
+    ("phoenix", ["--project", "p", "--source-scope", "s"]),
 ])
 def test_sync_pull_providers_validate_shared_window_flags(tmp_path, capsys, provider, extra):
     env_file = tmp_path / ".env"
@@ -1635,8 +1649,12 @@ def test_sync_pull_provider_failed_outcome_returns_nonzero(tmp_path, capsys):
     env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
     outcome = SyncOutcome("failed", "Sync failed: boom; lease released.", 1)
     with patch("metergraphrelay.cli.run_pull_sync", return_value=outcome):
-        assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p"]) == 1
-    assert "lease released" in capsys.readouterr().out
+        assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p",
+                     "--source-scope", "p"]) == 1
+    captured = capsys.readouterr()
+    # Failures go to stderr with the usual prefix; stdout stays quiet.
+    assert captured.err.startswith("Error: Sync failed: boom")
+    assert captured.out == ""
 
 
 def test_sync_pull_provider_busy_exits_zero(tmp_path, capsys):
@@ -1644,7 +1662,8 @@ def test_sync_pull_provider_busy_exits_zero(tmp_path, capsys):
     env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
     outcome = SyncOutcome("busy", "Another sync holds the lease; retry at t.", 0)
     with patch("metergraphrelay.cli.run_pull_sync", return_value=outcome):
-        assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p"]) == 0
+        assert main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p",
+                     "--source-scope", "p"]) == 0
     assert "retry at" in capsys.readouterr().out
 
 
@@ -1660,5 +1679,6 @@ def test_sync_allow_skipped_flag_is_forwarded(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
     with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run:
-        main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p", "--allow-skipped"])
+        main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p",
+              "--source-scope", "p", "--allow-skipped"])
     assert run.call_args.kwargs["allow_skipped"] is True

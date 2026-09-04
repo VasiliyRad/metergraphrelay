@@ -34,12 +34,13 @@ takes.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 from typing import Callable, Protocol
 
 from .metergraph_sync import LeaseLostError, MeterGraphSyncError
-from .portkey_sync import RENEW_INTERVAL_SECONDS, SyncOutcome, _LeaseRenewer
+from .sync_core import RENEW_INTERVAL_SECONDS, LeaseRenewer, SyncOutcome
 from .import_identity import ImportContext, ImportIdentityError
 from .push import push_file
 
@@ -115,7 +116,10 @@ def run_pull_sync(
     def renew() -> None:
         mg_client.renew(lease.lease_id)
 
-    renewer = _LeaseRenewer(renew, clock=clock, interval=renew_interval_seconds)
+    renewer = LeaseRenewer(renew, clock=clock, interval=renew_interval_seconds)
+    window = f"{lease.window_start}..{lease.window_end}"
+    phase = "pull"
+    pushed = failed = skipped = 0
     try:
         with tempfile.TemporaryDirectory(dir=work_dir) as staging:
             rows_path = os.path.join(staging, "rows.jsonl")
@@ -131,34 +135,47 @@ def run_pull_sync(
                 # In sync mode there is no export file to recover a skipped row
                 # from: once the checkpoint advances it is gone. Leave the
                 # window pending unless the caller accepted that.
-                _safe_abandon(mg_client, lease.lease_id)
+                released = _safe_abandon(mg_client, lease)
                 return SyncOutcome(
                     "failed",
-                    f"{skipped} row(s) in window {lease.window_start}.."
-                    f"{lease.window_end} could not be normalized (see warnings "
-                    "above); lease released and the window left pending. Fix the "
-                    "rows, or pass --allow-skipped to advance past them.",
+                    f"{skipped} row(s) in window {window} could not be normalized "
+                    f"(see warnings above); {_release_note(released, lease)} and "
+                    "the window left pending. Fix the rows, or pass "
+                    "--allow-skipped to advance past them.",
                     1, pushed=0, failed=0, skipped=skipped,
                 )
-            pushed = failed = 0
+            phase = "push"
             if imported:
                 pushed, failed = push(
                     rows_path, push_token, base_url=ingest_base_url,
                     on_progress=renewer.tick,
                 )
+            if pushed + failed != imported:
+                # The upload did not account for every staged row. Completing
+                # here would advance the checkpoint past rows nobody sent.
+                released = _safe_abandon(mg_client, lease)
+                return SyncOutcome(
+                    "failed",
+                    f"push accounted for {pushed + failed} of {imported} staged "
+                    f"row(s) in window {window}; {_release_note(released, lease)}, "
+                    "will retry next run.",
+                    1, pushed=pushed, failed=failed, skipped=skipped,
+                )
             if failed:
                 # Do NOT complete: the untouched server checkpoint is retried on
                 # the next run, so nothing is silently dropped.
-                _safe_abandon(mg_client, lease.lease_id)
+                released = _safe_abandon(mg_client, lease)
                 return SyncOutcome(
                     "failed",
-                    f"{failed} row(s) failed to upload; lease released, will retry next run.",
+                    f"{failed} of {imported} row(s) in window {window} failed to "
+                    f"upload; {_release_note(released, lease)}, will retry next run.",
                     1, pushed=pushed, failed=failed, skipped=skipped,
                 )
+            phase = "complete"
             mg_client.complete(lease.lease_id)  # complete ONLY after every upload succeeded
             return SyncOutcome(
                 "completed",
-                f"Imported window {lease.window_start}..{lease.window_end}: "
+                f"Imported window {window}: "
                 f"pushed {pushed} row(s), skipped {skipped}, {failed} failed.",
                 0, pushed=pushed, failed=failed, skipped=skipped,
             )
@@ -166,22 +183,54 @@ def run_pull_sync(
         # Already gone (expired/stolen), including when discovered by a renew
         # fired from a progress tick. No DELETE: there is nothing to release.
         return SyncOutcome(
-            "failed", f"Lease lost mid-run ({exc}); relying on server lease expiry.", 1
+            "failed",
+            f"Lease lost during {phase} of window {window} ({exc}); "
+            f"{_already_sent(phase, pushed)}relying on server lease expiry.",
+            1, pushed=pushed, failed=failed, skipped=skipped,
         )
     except (MeterGraphSyncError, OSError, ImportIdentityError, *provider_errors) as exc:
-        _safe_abandon(mg_client, lease.lease_id)
-        return SyncOutcome("failed", f"Sync failed: {exc}; lease released.", 1)
+        released = _safe_abandon(mg_client, lease)
+        return SyncOutcome(
+            "failed",
+            f"Sync failed during {phase} of window {window}: {exc}; "
+            f"{_already_sent(phase, pushed)}{_release_note(released, lease)}.",
+            1, pushed=pushed, failed=failed, skipped=skipped,
+        )
     except Exception:
         # Anything unforeseen still propagates as a traceback, but never with
         # the lease held: the next run must not sit on "busy" for 15 minutes
         # because of a bug here.
-        _safe_abandon(mg_client, lease.lease_id)
+        _safe_abandon(mg_client, lease)
         raise
 
 
-def _safe_abandon(mg_client, lease_id: str) -> None:
-    """Release the lease, swallowing release errors so they never mask a primary failure."""
+def _already_sent(phase: str, pushed: int) -> str:
+    """Say so when rows reached the server before the failure.
+
+    A failure at complete() leaves every row on the server; the next run
+    re-pulls the window and the server deduplicates on import identity.
+    """
+    if phase == "complete" and pushed:
+        return f"{pushed} row(s) already uploaded and will be re-sent and deduplicated; "
+    return ""
+
+
+def _release_note(released: bool, lease) -> str:
+    if released:
+        return "lease released"
+    return f"lease release failed (the server expires it at {lease.lease_expires_at})"
+
+
+def _safe_abandon(mg_client, lease) -> bool:
+    """Release the lease; a release failure is reported, never allowed to mask
+    the primary failure. Returns whether the release succeeded."""
     try:
-        mg_client.abandon(lease_id)
-    except MeterGraphSyncError:
-        pass
+        mg_client.abandon(lease.lease_id)
+    except (MeterGraphSyncError, OSError) as exc:
+        print(
+            f"Warning: could not release lease {lease.lease_id}: {exc}; the "
+            f"server expires it at {lease.lease_expires_at}.",
+            file=sys.stderr,
+        )
+        return False
+    return True
