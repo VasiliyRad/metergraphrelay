@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Any
 
 from .. import __version__
+from ..window import normalize_utc_designator
 
 DEFAULT_PHOENIX_URL = "http://localhost:6006"
 SPANS_PATH_TEMPLATE = "/v1/projects/{project}/spans"
@@ -124,8 +125,7 @@ def fetch_spans_page(
         raise PhoenixAPIError(
             "Phoenix API response missing/malformed 'data' — the spans endpoint "
             "returns {\"data\": [...], \"next_cursor\": ...}; check the base URL "
-            "points at a Phoenix server new enough to serve "
-            "GET /v1/projects/{project}/spans"
+            "points at a Phoenix server (13.15 or newer)"
         )
     raw_cursor = payload.get("next_cursor")
     if raw_cursor is not None and not (isinstance(raw_cursor, str) and raw_cursor):
@@ -202,27 +202,50 @@ def _messages(attributes: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
             field = key[len(base):]
             if "." in field:
                 # Nested tool call / content block attributes are kept out of
-                # the plain chat message list; tool names are read separately.
+                # the plain chat message list; tool names are read separately
+                # and content blocks are folded in below.
                 continue
             message[field] = attributes[key]
         message.setdefault("role", "")
-        message.setdefault("content", "")
+        if not message.get("content"):
+            # Multimodal and content-block messages carry their text under
+            # contents.<j>.message_content.text instead of a plain content.
+            message["content"] = _content_block_text(attributes, base)
         messages.append(message)
         index += 1
     return messages
 
 
-def _tool_names(attributes: dict[str, Any]) -> list[str] | None:
-    names: list[str] = []
-    prefix = f"{ATTR_OUTPUT_MESSAGES}.0.message.tool_calls."
+def _content_block_text(attributes: dict[str, Any], base: str) -> str:
+    texts: list[str] = []
     index = 0
     while True:
-        key = f"{prefix}{index}.tool_call.function.name"
-        name = _str(attributes, key)
-        if name is None:
+        block = f"{base}contents.{index}.message_content."
+        if not any(key.startswith(block) for key in attributes):
             break
-        names.append(name)
+        text = attributes.get(f"{block}text")
+        if isinstance(text, str) and text:
+            texts.append(text)
         index += 1
+    return "\n".join(texts)
+
+
+def _tool_names(attributes: dict[str, Any]) -> list[str] | None:
+    """Tool call names across every output message, in order."""
+    names: list[str] = []
+    message = 0
+    while True:
+        base = f"{ATTR_OUTPUT_MESSAGES}.{message}.message."
+        if not any(key.startswith(base) for key in attributes):
+            break
+        call = 0
+        while True:
+            name = _str(attributes, f"{base}tool_calls.{call}.tool_call.function.name")
+            if name is None:
+                break
+            names.append(name)
+            call += 1
+        message += 1
     return names or None
 
 
@@ -234,13 +257,19 @@ def _is_chat_message_list(value: Any) -> bool:
 
 
 def _map_input(attributes: dict[str, Any]) -> tuple[str | None, str | None]:
-    """(request_json, request_text) from the flattened messages or input.value."""
+    """(request_json, request_text) from the flattened messages or input.value.
+
+    Flattened messages win when any of them carries content. A message list
+    whose content is entirely empty (an instrumentor that only emitted nested
+    attributes this reader does not understand) falls through to input.value,
+    which holds the whole request payload, rather than shipping blank turns.
+    """
     messages = _messages(attributes, ATTR_INPUT_MESSAGES)
-    if messages:
+    if messages and any(message.get("content") for message in messages):
         return json.dumps(messages), None
     raw = attributes.get(ATTR_INPUT_VALUE)
     if raw is None:
-        return None, None
+        return (json.dumps(messages), None) if messages else (None, None)
     if isinstance(raw, str):
         if _str(attributes, ATTR_INPUT_MIME) == "application/json":
             try:
@@ -269,22 +298,17 @@ def _response_text(attributes: dict[str, Any]) -> str | None:
     return raw if isinstance(raw, str) else json.dumps(raw)
 
 
-def normalize_utc_designator(timestamp: str) -> str:
-    """``Z`` -> ``+00:00`` so a Python 3.10 consumer parses it as historical."""
-    if timestamp.endswith("Z"):
-        return timestamp[:-1] + "+00:00"
-    return timestamp
-
-
 def _latency_ms(start_time: Any, end_time: Any) -> int | None:
     if not isinstance(start_time, str) or not isinstance(end_time, str):
         return None
     try:
         start = datetime.fromisoformat(normalize_utc_designator(start_time))
         end = datetime.fromisoformat(normalize_utc_designator(end_time))
-    except ValueError:
-        return None
-    if end < start:
+        if end < start:
+            return None
+    except (ValueError, TypeError):
+        # Unparseable, or a naive/aware pair that cannot be compared: the span
+        # still imports, only without latency.
         return None
     return round((end - start).total_seconds() * 1000)
 
@@ -389,6 +413,7 @@ def pull_phoenix(
         raise PhoenixAPIError("at least one project is required")
     imported = 0
     skipped = 0
+    filtered = 0
 
     output_dir = os.path.dirname(output_path) or "."
     fd, tmp_path = tempfile.mkstemp(
@@ -423,6 +448,12 @@ def pull_phoenix(
                     for span in spans:
                         if imported >= count:
                             break
+                        if isinstance(span, dict) and span.get("span_kind") not in (None, LLM_SPAN_KIND):
+                            # Phoenix before 13.15 ignores the span_kind query
+                            # parameter and returns every kind; never let a
+                            # CHAIN/TOOL/RETRIEVER span import as a model call.
+                            filtered += 1
+                            continue
                         try:
                             row = normalize_span(
                                 span, project=project, route_override=route
@@ -447,4 +478,10 @@ def pull_phoenix(
         os.replace(tmp_path, output_path)
     finally:
         _cleanup_temp_file(tmp_path)
+    if filtered:
+        print(
+            f"Warning: Phoenix returned {filtered} non-LLM span(s) despite the "
+            "span_kind filter (servers before 13.15 ignore it); they were left out.",
+            file=sys.stderr,
+        )
     return imported, skipped

@@ -273,8 +273,10 @@ JSONL shape as `pull openai`. Only LLM spans are imported:
 model calls, and Phoenix annotations and evals are never imported.
 
 This reads Phoenix's **`GET /v1/projects/{project}/spans`** endpoint with
-cursor pagination, so it needs a Phoenix server new enough to serve it
-(Phoenix 11+; the `arizephoenix/phoenix` image does).
+cursor pagination and its `span_kind` / `name` filters, which Phoenix added
+in **13.15**. An older server ignores unknown query parameters and returns
+every span kind; the relay filters those out locally and warns, so nothing
+but LLM spans is ever imported, but `--name` has no effect there.
 
 **Setup:** nothing, for a local Phoenix. The default base URL is
 `http://localhost:6006`. For a remote or authenticated Phoenix, set these
@@ -302,7 +304,8 @@ in `.env` (or pass `--base-url` / `--phoenix-api-key` per-command):
   started, captured once for the whole pull.
 - `--name` matches the span name. Repeatable; multiple values are **OR'd**.
 - `--count` is always a cap on the number of **LLM spans** imported, never
-  a count of distinct traces. Results are newest first.
+  a count of distinct traces. Results come back most recently ingested
+  first, which for live traffic is newest first.
 
 **Field mapping notes.**
 
@@ -322,8 +325,9 @@ in `.env` (or pass `--base-url` / `--phoenix-api-key` per-command):
 - `cost_usd` is left empty: the spans endpoint does not return Phoenix's
   computed cost, and metergraph prices the row from its own catalog.
 - Prompt and response come from the flattened `llm.input_messages.*` /
-  `llm.output_messages.*` attributes, falling back to `input.value` /
-  `output.value`. Tool call names land under `tool_names`.
+  `llm.output_messages.*` attributes, including content-block text,
+  falling back to `input.value` / `output.value`. Tool call names from
+  every output message land under `tool_names`.
 - The source project lands under `tags.phoenix_project`.
 
 **Before running this against your own data:** `pull phoenix` transfers
