@@ -469,3 +469,84 @@ def test_pull_phoenix_requires_a_project(tmp_path):
             route=None,
             output_path=str(tmp_path / "out.jsonl"),
         )
+
+
+def test_messages_fold_content_block_text_into_content():
+    attributes = {
+        "llm.input_messages.0.message.role": "user",
+        "llm.input_messages.0.message.contents.0.message_content.type": "text",
+        "llm.input_messages.0.message.contents.0.message_content.text": "Describe this",
+        "llm.input_messages.0.message.contents.1.message_content.type": "image",
+        "llm.input_messages.0.message.contents.1.message_content.image.image.url": "data:...",
+        "llm.input_messages.0.message.contents.2.message_content.type": "text",
+        "llm.input_messages.0.message.contents.2.message_content.text": "in detail",
+    }
+    request_json, request_text = _map_input(attributes)
+    assert request_text is None
+    assert json.loads(request_json) == [{"role": "user", "content": "Describe this\nin detail"}]
+
+
+def test_map_input_falls_back_to_input_value_when_every_message_is_blank():
+    attributes = {
+        "llm.input_messages.0.message.role": "user",
+        "llm.input_messages.0.message.unknown.nested": "x",
+        "input.mime_type": "application/json",
+        "input.value": json.dumps({"messages": [{"role": "user", "content": "the real prompt"}]}),
+    }
+    request_json, request_text = _map_input(attributes)
+    assert json.loads(request_json) == [{"role": "user", "content": "the real prompt"}]
+    assert request_text is None
+    # With nothing to fall back to, the blank list is still better than nothing.
+    attributes.pop("input.value")
+    request_json, _ = _map_input(attributes)
+    assert json.loads(request_json) == [{"role": "user", "content": ""}]
+
+
+def test_tool_names_are_read_from_every_output_message():
+    attributes = {
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "lookup",
+        "llm.output_messages.1.message.role": "assistant",
+        "llm.output_messages.1.message.tool_calls.0.tool_call.function.name": "refund",
+        "llm.output_messages.1.message.tool_calls.1.tool_call.function.name": "notify",
+    }
+    row = normalize_span(make_span(attributes=attributes), project="p", route_override=None)
+    assert row["tool_names"] == ["lookup", "refund", "notify"]
+
+
+def test_latency_survives_a_naive_and_aware_timestamp_pair():
+    span = make_span(start_time="2026-09-03T22:23:12+00:00", end_time="2026-09-03T22:23:13")
+    row = normalize_span(span, project="p", route_override=None)
+    assert row["latency_ms"] is None
+    assert row["input_tokens"] == 305  # the span itself still imports
+
+
+def test_lowercase_utc_designator_is_normalized():
+    row = normalize_span(make_span(start_time="2026-08-10T12:00:00z"), project="p", route_override=None)
+    assert row["ts"] == "2026-08-10T12:00:00+00:00"
+
+
+def test_pull_phoenix_filters_non_llm_spans_an_old_server_returns(tmp_path, capsys):
+    output = tmp_path / "out.jsonl"
+    chain = make_span(id="chain", span_kind="CHAIN", name="pipeline")
+    tool = make_span(id="tool", span_kind="TOOL", name="lookup")
+    with patch(
+        "metergraphrelay.providers.phoenix.fetch_spans_page",
+        side_effect=_pages(([chain, make_span(id="llm"), tool], None)),
+    ):
+        imported, skipped = pull_phoenix(
+            base_url="http://localhost:6006",
+            api_key=None,
+            projects=["p"],
+            count=10,
+            since=None,
+            until=None,
+            names=[],
+            route=None,
+            output_path=str(output),
+        )
+
+    assert (imported, skipped) == (1, 0)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [row["route"] for row in rows] == ["support-desk/draft-reply"]
+    assert "2 non-LLM span(s)" in capsys.readouterr().err
