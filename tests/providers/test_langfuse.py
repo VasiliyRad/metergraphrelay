@@ -1294,40 +1294,16 @@ def test_pull_langfuse_treats_json_dumps_failure_as_malformed_row_skip(
     assert "obs-bad" in captured.err
 
 
-# Langfuse's usageDetails shape depends on which integration recorded the
-# observation. Reading "input"/"output" alone loses tokens on two of the three.
+# Langfuse stores usageDetails flat, but which keys appear depends on the
+# integration that recorded the observation. Reading "input"/"output" alone
+# loses tokens on most of them.
 
 
-def test_usage_details_from_the_openai_wrapper_are_not_dropped():
-    """The openai wrapper stores raw OpenAI names, so there is no "input" key.
+def test_usage_details_from_the_openai_wrapper_add_subtracted_details_back():
+    """Langfuse ingestion flattens the OpenAI wrapper's usage.
 
-    Before this was handled, every observation recorded through Langfuse's
-    OpenAI wrapper imported with null token counts.
-    """
-    observation = make_observation(
-        usageDetails={
-            "prompt_tokens": 100,
-            "completion_tokens": 20,
-            "total_tokens": 120,
-            "prompt_tokens_details": {"cached_tokens": 80},
-            "completion_tokens_details": {"reasoning_tokens": 5},
-        }
-    )
-
-    row = normalize_observation(observation, route_override=None)
-
-    # Nested details are already excluded from the parent totals upstream, so
-    # these pass through unchanged.
-    assert row["input_tokens"] == 100
-    assert row["output_tokens"] == 20
-    assert row["cache_read_tokens"] == 80
-    assert row["reasoning_tokens"] == 5
-
-
-def test_flattened_usage_details_add_subtracted_detail_tokens_back():
-    """The langchain handler subtracts each detail from its parent.
-
-    Langfuse stores input=20 for a 100-token prompt with 80 cached. metergraph
+    prompt_tokens=100 with 80 cached is stored as input=20 plus
+    input_cached_tokens=80 (each detail subtracted from its parent). metergraph
     treats input_tokens as the total with cache_read as a subset, so the detail
     is added back; otherwise every cached call under-reports its input.
     """
@@ -1335,6 +1311,7 @@ def test_flattened_usage_details_add_subtracted_detail_tokens_back():
         usageDetails={
             "input": 20,
             "output": 15,
+            "total": 100,
             "input_cached_tokens": 80,
             "output_reasoning_tokens": 5,
         }
@@ -1345,7 +1322,111 @@ def test_flattened_usage_details_add_subtracted_detail_tokens_back():
     assert row["input_tokens"] == 100
     assert row["output_tokens"] == 20
     assert row["cache_read_tokens"] == 80
+    assert row["cache_write_tokens"] is None
     assert row["reasoning_tokens"] == 5
+
+
+def test_usage_details_from_the_langchain_handler_use_its_detail_names():
+    """The LangChain callback flattens usage_metadata details verbatim.
+
+    Its names are input_cache_read / input_cache_creation / output_reasoning,
+    not the *_tokens spellings the OpenAI path produces. Before these were
+    listed, every LangChain observation imported with the totals right but
+    the cache and reasoning columns empty.
+    """
+    observation = make_observation(
+        usageDetails={
+            "input": 10,
+            "output": 15,
+            "input_cache_read": 3,
+            "input_cache_creation": 2,
+            "output_reasoning": 5,
+        }
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 15
+    assert row["output_tokens"] == 20
+    assert row["cache_read_tokens"] == 3
+    assert row["cache_write_tokens"] == 2
+    assert row["reasoning_tokens"] == 5
+
+
+def test_usage_details_gateway_fallthrough_keeps_raw_inclusive_totals():
+    """A response the wrapper schema rejects keeps OpenAI's raw names.
+
+    Those are inclusive totals with the details dropped, so nothing is added.
+    """
+    observation = make_observation(
+        usageDetails={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 100
+    assert row["output_tokens"] == 20
+    assert row["cache_read_tokens"] is None
+    assert row["reasoning_tokens"] is None
+
+
+def test_usage_details_with_anthropic_native_names_map_totals_and_cache():
+    """A native-SDK caller may pass Anthropic's own usage names through.
+
+    Anthropic's input_tokens excludes cached tokens, so its cache buckets are
+    added back too; without input_tokens in the total keys the row shipped
+    cache counts beside null totals.
+    """
+    observation = make_observation(
+        usageDetails={
+            "input_tokens": 20,
+            "output_tokens": 15,
+            "cache_read_input_tokens": 80,
+            "cache_creation_input_tokens": 10,
+        }
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 110
+    assert row["output_tokens"] == 15
+    assert row["cache_read_tokens"] == 80
+    assert row["cache_write_tokens"] == 10
+
+
+def test_usage_details_priority_tier_buckets_are_not_added_back():
+    """Priority-tier markers overlap the parent count, so they are not buckets."""
+    observation = make_observation(
+        usageDetails={"input": 10, "output": 15, "input_cache_read": 3, "input_priority": 5}
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 13
+    assert row["output_tokens"] == 15
+
+
+def test_usage_details_gemini_names_map_in_either_spelling():
+    for details in (
+        {"promptTokenCount": 100, "candidatesTokenCount": 20, "thoughtsTokenCount": 5},
+        {"prompt_token_count": 100, "candidates_token_count": 20, "thoughts_token_count": 5},
+    ):
+        row = normalize_observation(
+            make_observation(usageDetails=details), route_override=None
+        )
+        assert (row["input_tokens"], row["output_tokens"], row["reasoning_tokens"]) == (100, 20, 5)
+
+
+def test_usage_details_zero_values_survive_as_zero():
+    observation = make_observation(
+        usageDetails={"input": 0, "output": 0, "input_cached_tokens": 0}
+    )
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["cache_read_tokens"] == 0
 
 
 def test_usage_details_without_any_detail_keys_are_unchanged():
