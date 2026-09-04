@@ -1526,6 +1526,7 @@ def test_sync_langfuse_dispatches_with_public_key_as_default_scope(tmp_path, cap
     assert kwargs["push_token"] == "tok-123"
     assert kwargs["ingest_base_url"] == "http://localhost:8080"
     assert kwargs["provider_errors"] == (LangfuseAPIError,)
+    assert kwargs["allow_skipped"] is False
     assert pulled["since"] == "2026-08-19T00:00:00+00:00"
     assert pulled["until"] == "2026-08-19T01:00:00+00:00"
     assert pulled["count"] >= 1_000_000
@@ -1653,3 +1654,11 @@ def test_sync_help_lists_every_provider(capsys):
     out = capsys.readouterr().out
     for name in ("openai", "portkey", "langfuse", "braintrust", "phoenix"):
         assert name in out
+
+
+def test_sync_allow_skipped_flag_is_forwarded(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run:
+        main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p", "--allow-skipped"])
+    assert run.call_args.kwargs["allow_skipped"] is True

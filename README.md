@@ -503,11 +503,16 @@ deduplicated server-side and never double-counts. `pull` writes no such
 identity, so a `pull` followed by a `sync` over the same range does count
 twice.
 
-**Exit behavior, windows, and failures** are exactly Portkey's: `busy` and
+**Exit behavior, windows, and failures** follow Portkey's: `busy` and
 `caught_up` exit 0; a failed row releases the lease and exits nonzero with
-the same window pending; a lost lease exits nonzero and waits for the server
-to expire it. There is no volume split: a large window simply pages further,
-and the per-row progress hook renews the lease as it goes.
+the same window pending; a lost lease exits nonzero immediately and later
+runs see `busy` until the server expires it. Two checks are stricter than
+`pull`: a row the provider cannot normalize leaves the window pending (pass
+`--allow-skipped` to advance past it, since in sync mode there is no export
+file to recover it from), and a row whose provider id cannot serve as an
+import identity fails the window before anything uploads. There is no
+volume split: a large window simply pages further, and a progress hook fired
+per imported row renews the lease as it goes.
 
 **Cron example** — hourly, one line per source:
 

@@ -9,7 +9,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
-from .portkey import ImportContext
+from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
 
 # Braintrust's US data plane. The EU plane (https://api-eu.braintrust.dev) and a
@@ -535,7 +535,7 @@ def normalize_span(
         # overlap re-pull deduplicates on the server instead of double counting.
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
-        row["import_event_id"] = span["id"]
+        row["import_event_id"] = canonical_import_event_id(span.get("id"))
     return row
 
 

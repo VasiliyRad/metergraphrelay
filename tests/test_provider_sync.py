@@ -22,7 +22,7 @@ from metergraphrelay.metergraph_sync import (
 )
 from metergraphrelay.portkey_sync import RENEW_INTERVAL_SECONDS
 from metergraphrelay.provider_sync import SYNC_SOURCES, run_pull_sync
-from metergraphrelay.providers.portkey import ImportContext
+from metergraphrelay.import_identity import ImportContext, ImportIdentityError
 
 WINDOW_START = "2026-08-19T00:00:00+00:00"
 WINDOW_END = "2026-08-19T01:00:00+00:00"
@@ -142,14 +142,14 @@ def test_rejects_a_source_outside_the_sync_set():
 @pytest.mark.parametrize("source", SYNC_SOURCES)
 def test_happy_path_pulls_the_server_window_pushes_and_completes(source):
     mg = FakeMeterGraph(_acquired())
-    pull = FakePull([{"request_id": "a"}, {"request_id": "b"}], skipped=1)
+    pull = FakePull([{"request_id": "a"}, {"request_id": "b"}])
     pushes = []
 
     outcome = _run(mg, pull, pushes, source=source, source_scope="scope-x")
 
     assert outcome.status == "completed"
     assert outcome.exit_code == 0
-    assert (outcome.pushed, outcome.failed, outcome.skipped) == (2, 0, 1)
+    assert (outcome.pushed, outcome.failed, outcome.skipped) == (2, 0, 0)
     assert mg.acquire_kwargs == {
         "source": source, "source_scope": "scope-x",
         "initial_since": "2026-08-01T00:00:00+00:00", "max_window_seconds": 3600,
@@ -232,10 +232,49 @@ def test_provider_error_releases_the_lease():
     assert mg.abandoned == ["lease-1"] and mg.completed == []
 
 
-def test_unlisted_provider_error_propagates():
+def test_unlisted_provider_error_propagates_but_still_releases_the_lease():
     mg = FakeMeterGraph(_acquired())
     with pytest.raises(ProviderBoom):
         _run(mg, FakePull([], error=ProviderBoom("api down")), [], provider_errors=())
+    # A bug must not leave the next run sitting on "busy" for 15 minutes.
+    assert mg.abandoned == ["lease-1"]
+    assert mg.completed == []
+
+
+def test_skipped_rows_leave_the_window_pending_by_default():
+    mg = FakeMeterGraph(_acquired())
+    pushes = []
+    outcome = _run(mg, FakePull([{"request_id": "a"}], skipped=2), pushes)
+    assert (outcome.status, outcome.exit_code) == ("failed", 1)
+    assert outcome.skipped == 2 and outcome.pushed == 0
+    # Nothing uploaded, nothing completed: the same window comes back next run.
+    assert pushes == []
+    assert mg.completed == []
+    assert mg.abandoned == ["lease-1"]
+    assert "--allow-skipped" in outcome.detail
+
+
+def test_allow_skipped_completes_the_window_and_reports_the_count():
+    mg = FakeMeterGraph(_acquired())
+    pushes = []
+    outcome = _run(mg, FakePull([{"request_id": "a"}], skipped=2), pushes, allow_skipped=True)
+    assert outcome.status == "completed"
+    assert (outcome.pushed, outcome.skipped) == (1, 2)
+    assert mg.completed == ["lease-1"]
+    assert "skipped 2" in outcome.detail
+
+
+def test_invalid_import_identity_fails_the_window_before_upload():
+    mg = FakeMeterGraph(_acquired())
+    pushes = []
+    outcome = _run(
+        mg, FakePull([], error=ImportIdentityError("import_event_id must be a string")), pushes,
+        provider_errors=(),
+    )
+    assert (outcome.status, outcome.exit_code) == ("failed", 1)
+    assert pushes == [] and mg.completed == []
+    assert mg.abandoned == ["lease-1"]
+    assert "import_event_id" in outcome.detail
 
 
 def test_complete_failure_releases_the_lease():

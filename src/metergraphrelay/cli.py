@@ -652,6 +652,15 @@ def _add_sync_common(parser: argparse.ArgumentParser, *, scope_help: str) -> Non
         help="Override the metergraph route field for every synced row.",
     )
     parser.add_argument(
+        "--allow-skipped",
+        action="store_true",
+        help=(
+            "Complete a window even if the provider skipped rows it could not "
+            "normalize. By default such a window is left pending, because a "
+            "skipped row cannot be recovered once the checkpoint advances."
+        ),
+    )
+    parser.add_argument(
         "--env-file",
         default=".env",
         help="Path to a .env file to load credentials from. (default: .env)",
@@ -949,6 +958,7 @@ def _run_sync_pull(args: argparse.Namespace, *, source: str, source_scope: str,
             push_token=push_token,
             ingest_base_url=ingest_base,
             provider_errors=provider_errors,
+            allow_skipped=args.allow_skipped,
         )
     except (MeterGraphSyncError, OSError, *provider_errors) as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from metergraphrelay import __version__
+from metergraphrelay.import_identity import ImportContext, ImportIdentityError
 from metergraphrelay.providers.phoenix import (
     BACKFILL_ROUTE,
     PAGE_LIMIT,
@@ -550,3 +551,36 @@ def test_pull_phoenix_filters_non_llm_spans_an_old_server_returns(tmp_path, caps
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert [row["route"] for row in rows] == ["support-desk/draft-reply"]
     assert "2 non-LLM span(s)" in capsys.readouterr().err
+
+
+def test_normalize_span_with_import_context_uses_the_otel_span_id_as_identity():
+    row = normalize_span(
+        make_span(),
+        project="mgsample",
+        route_override=None,
+        import_context=ImportContext(source="phoenix", source_scope="mgsample"),
+    )
+    assert row["import_source"] == "phoenix"
+    assert row["import_source_scope"] == "mgsample"
+    assert row["import_event_id"] == "559145fa99b81657" == row["span_id"]
+    # Without an OTel context, Phoenix's own span record id is the fallback.
+    row = normalize_span(
+        make_span(context={}), project="p", route_override=None,
+        import_context=ImportContext(source="phoenix", source_scope="p"),
+    )
+    assert row["import_event_id"] == "U3Bhbjo2"
+
+
+def test_normalize_span_without_import_context_omits_identity():
+    row = normalize_span(make_span(), project="p", route_override=None)
+    assert not {"import_source", "import_source_scope", "import_event_id"} & row.keys()
+
+
+def test_normalize_span_rejects_a_blank_import_event_id():
+    with pytest.raises(ImportIdentityError):
+        normalize_span(
+            make_span(id="", context={"trace_id": "t", "span_id": ""}),
+            project="p",
+            route_override=None,
+            import_context=ImportContext(source="phoenix", source_scope="p"),
+        )

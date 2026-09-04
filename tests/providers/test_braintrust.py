@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from metergraphrelay import __version__
+from metergraphrelay.import_identity import ImportContext, ImportIdentityError
 from metergraphrelay.providers.braintrust import (
     DEFAULT_BRAINTRUST_URL,
     PAGE_LIMIT,
@@ -834,3 +835,30 @@ def test_normalize_span_leaves_an_explicit_offset_unchanged():
 def test_normalize_span_rejects_a_non_string_created():
     with pytest.raises(AttributeError):
         normalize_span(make_span(created=1754395200), route_override=None)
+
+
+def test_normalize_span_with_import_context_uses_the_row_id_as_identity():
+    row = normalize_span(
+        make_span(id="span-row-7", span_id="span-7"),
+        route_override=None,
+        import_context=ImportContext(source="braintrust", source_scope="proj"),
+    )
+    assert row["import_source"] == "braintrust"
+    assert row["import_source_scope"] == "proj"
+    # The row id, not span_id: it is Braintrust's stable identity for the row.
+    assert row["import_event_id"] == "span-row-7" == row["request_id"]
+
+
+def test_normalize_span_without_import_context_omits_identity():
+    row = normalize_span(make_span(), route_override=None)
+    assert not {"import_source", "import_source_scope", "import_event_id"} & row.keys()
+
+
+@pytest.mark.parametrize("bad_id", ["", 42, None])
+def test_normalize_span_rejects_an_unusable_import_event_id(bad_id):
+    with pytest.raises(ImportIdentityError):
+        normalize_span(
+            make_span(id=bad_id),
+            route_override=None,
+            import_context=ImportContext(source="braintrust", source_scope="proj"),
+        )
