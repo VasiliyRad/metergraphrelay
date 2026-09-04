@@ -584,3 +584,22 @@ def test_normalize_span_rejects_a_blank_import_event_id():
             route_override=None,
             import_context=ImportContext(source="phoenix", source_scope="p"),
         )
+
+
+def test_pull_phoenix_ticks_progress_per_page_and_per_row_including_skipped(tmp_path):
+    broken = make_span(id="broken")
+    del broken["start_time"]
+    ticks = []
+    with patch(
+        "metergraphrelay.providers.phoenix.fetch_spans_page",
+        side_effect=_pages(([make_span(id="a"), broken], "c1"), ([make_span(id="b")], None)),
+    ):
+        imported, skipped = pull_phoenix(
+            base_url="http://localhost:6006", api_key=None, projects=["p"], count=10,
+            since=None, until=None, names=[], route=None,
+            output_path=str(tmp_path / "out.jsonl"), on_progress=lambda: ticks.append(1),
+        )
+    # 2 page fetches + 2 imported + 1 skipped: a window that only pages or
+    # only skips still renews the lease.
+    assert (imported, skipped) == (2, 1)
+    assert len(ticks) == 5

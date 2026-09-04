@@ -593,6 +593,8 @@ def pull_braintrust(
                 spans, cursor = fetch_spans_page(
                     base_url, api_key=api_key, query=query
                 )
+                if on_progress is not None:
+                    on_progress()  # a page fetch is progress too
                 if not spans:
                     break
                 for span in spans:
@@ -605,6 +607,8 @@ def pull_braintrust(
                         line = json.dumps(row)
                     except (KeyError, TypeError, AttributeError) as exc:
                         skipped += 1
+                        if on_progress is not None:
+                            on_progress()
                         span_id = (
                             span.get("id", "<unknown>")
                             if isinstance(span, dict)

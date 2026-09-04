@@ -493,17 +493,19 @@ def build_parser() -> argparse.ArgumentParser:
             "acquire/resume/complete owned by the metergraph import-sync "
             "server. Safe to run from cron, idempotent, no local checkpoint "
             "files. Requires LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and "
-            "METERGRAPH_APP_TOKEN. --source-scope names the Langfuse project "
-            "on the metergraph side (default: the public key, which identifies "
-            "the project and is not a secret). --initial-since seeds only the "
+            "METERGRAPH_APP_TOKEN. --source-scope names this sync stream on the "
+            "metergraph side and is required: the checkpoint is keyed on it. "
+            "--initial-since seeds only the "
             "first run. Observation content is uploaded with no opt-out."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help="Sync Langfuse generations to metergraph (server-coordinated cron mode)",
     )
     _add_sync_common(sync_langfuse_parser, scope_help=(
-        "Identifier for this Langfuse project on the metergraph side "
-        "(default: the Langfuse public key, which is not a secret)."
+        "Name of this sync stream on the metergraph side, e.g. the Langfuse "
+        "project name. Required. The checkpoint is keyed on it, so keep it "
+        "stable across key rotation, and give each selector set (a different "
+        "--tag or --trace-name) its own scope."
     ))
     sync_langfuse_parser.add_argument(
         "--trace-name", action="append", default=None, metavar="TRACE_NAME",
@@ -542,15 +544,16 @@ def build_parser() -> argparse.ArgumentParser:
             "acquire/resume/complete owned by the metergraph import-sync "
             "server. Safe to run from cron, idempotent, no local checkpoint "
             "files. Requires BRAINTRUST_API_KEY and METERGRAPH_APP_TOKEN. "
-            "--source-scope defaults to the --project list. --initial-since "
+            "--source-scope is required and keys the checkpoint. --initial-since "
             "seeds only the first run. Span content is uploaded with no opt-out."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help="Sync Braintrust LLM spans to metergraph (server-coordinated cron mode)",
     )
     _add_sync_common(sync_braintrust_parser, scope_help=(
-        "Identifier for this Braintrust project set on the metergraph side "
-        "(default: the --project values joined with commas)."
+        "Name of this sync stream on the metergraph side, e.g. the Braintrust "
+        "project name. Required. The checkpoint is keyed on it, so keep it "
+        "stable when projects are added or renamed."
     ))
     sync_braintrust_parser.add_argument(
         "--project", action="append", required=True, metavar="PROJECT",
@@ -577,7 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
             "with acquire/resume/complete owned by the metergraph import-sync "
             "server. Safe to run from cron, idempotent, no local checkpoint "
             "files. Requires METERGRAPH_APP_TOKEN; a local Phoenix needs no "
-            "credential. --source-scope defaults to the --project list. "
+            "credential. --source-scope is required and keys the checkpoint. "
             "--initial-since seeds only the first run. Span content is "
             "uploaded with no opt-out."
         ),
@@ -585,8 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sync Phoenix LLM spans to metergraph (server-coordinated cron mode)",
     )
     _add_sync_common(sync_phoenix_parser, scope_help=(
-        "Identifier for this Phoenix project set on the metergraph side "
-        "(default: the --project values joined with commas)."
+        "Name of this sync stream on the metergraph side, e.g. the Phoenix "
+        "project name. Required. The checkpoint is keyed on it, so keep it "
+        "stable, and give each --name selector set its own scope."
     ))
     sync_phoenix_parser.add_argument(
         "--project", action="append", required=True, metavar="PROJECT",
@@ -864,7 +868,7 @@ def _run_sync_portkey_api(args: argparse.Namespace) -> int:
     except (MeterGraphSyncError, PortkeyExportError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(outcome.detail)
+    _print_outcome(outcome)
     return outcome.exit_code
 
 
@@ -963,8 +967,30 @@ def _run_sync_pull(args: argparse.Namespace, *, source: str, source_scope: str,
     except (MeterGraphSyncError, OSError, *provider_errors) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(outcome.detail)
+    _print_outcome(outcome)
     return outcome.exit_code
+
+
+def _print_outcome(outcome) -> None:
+    """Failures go to stderr with the usual prefix so cron mail and log
+    shippers see the reason; the quiet no-op and success lines stay on stdout."""
+    if outcome.status == "failed":
+        print(f"Error: {outcome.detail}", file=sys.stderr)
+    else:
+        print(outcome.detail)
+
+
+def _require_source_scope(args: argparse.Namespace) -> str:
+    # No derived default: a public key rotates, a project list gets reordered
+    # or renamed, and either would silently start a fresh checkpoint that
+    # re-imports history under a scope that deduplicates against nothing.
+    if not args.source_scope or not args.source_scope.strip():
+        raise ConfigError(
+            "--source-scope is required: it names this sync stream's checkpoint "
+            "on the metergraph server. Use a stable label such as the project "
+            "name, and a distinct one per selector set."
+        )
+    return args.source_scope.strip()
 
 
 def _run_sync_langfuse(args: argparse.Namespace) -> int:
@@ -976,9 +1002,10 @@ def _run_sync_langfuse(args: argparse.Namespace) -> int:
     base_url = (
         args.base_url or os.environ.get("LANGFUSE_BASE_URL") or DEFAULT_LANGFUSE_HOST
     )
-    # The public key identifies the Langfuse project and is designed to ship in
-    # client-side code, so it is a safe default scope; the secret never is.
-    source_scope = args.source_scope or public_key
+    try:
+        source_scope = _require_source_scope(args)
+    except ConfigError as exc:
+        return _config_error(exc)
 
     def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
         return pull_langfuse(
@@ -1014,7 +1041,10 @@ def _run_sync_braintrust(args: argparse.Namespace) -> int:
         or os.environ.get("BRAINTRUST_BASE_URL")
         or DEFAULT_BRAINTRUST_URL
     )
-    source_scope = args.source_scope or ",".join(args.project)
+    try:
+        source_scope = _require_source_scope(args)
+    except ConfigError as exc:
+        return _config_error(exc)
 
     def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
         return pull_braintrust(
@@ -1046,7 +1076,10 @@ def _run_sync_phoenix(args: argparse.Namespace) -> int:
     base_url = (
         args.base_url or os.environ.get("PHOENIX_BASE_URL") or DEFAULT_PHOENIX_URL
     )
-    source_scope = args.source_scope or ",".join(args.project)
+    try:
+        source_scope = _require_source_scope(args)
+    except ConfigError as exc:
+        return _config_error(exc)
 
     def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
         return pull_phoenix(

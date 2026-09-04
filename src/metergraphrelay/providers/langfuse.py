@@ -485,6 +485,8 @@ def pull_langfuse(
                     secret_key=secret_key,
                     params=page_params,
                 )
+                if on_progress is not None:
+                    on_progress()  # a page fetch is progress too
                 observations = payload["data"]
                 if not observations:
                     break
@@ -500,6 +502,8 @@ def pull_langfuse(
                         line = json.dumps(row)
                     except (KeyError, TypeError, AttributeError) as exc:
                         skipped += 1
+                        if on_progress is not None:
+                            on_progress()
                         obs_id = (
                             observation.get("id", "<unknown>")
                             if isinstance(observation, dict)

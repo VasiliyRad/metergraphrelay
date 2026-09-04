@@ -20,7 +20,7 @@ from metergraphrelay.metergraph_sync import (
     LeaseLostError,
     MeterGraphSyncError,
 )
-from metergraphrelay.portkey_sync import RENEW_INTERVAL_SECONDS
+from metergraphrelay.sync_core import RENEW_INTERVAL_SECONDS
 from metergraphrelay.provider_sync import SYNC_SOURCES, run_pull_sync
 from metergraphrelay.import_identity import ImportContext, ImportIdentityError
 
@@ -355,7 +355,7 @@ def test_os_error_during_pull_releases_the_lease():
     assert mg.abandoned == ["lease-1"]
 
 
-def test_release_error_never_masks_the_primary_failure():
+def test_release_error_never_masks_the_primary_failure_but_is_reported(capsys):
     class Flaky(FakeMeterGraph):
         def abandon(self, lease_id):
             raise MeterGraphSyncError("release 500")
@@ -364,3 +364,34 @@ def test_release_error_never_masks_the_primary_failure():
     outcome = _run(mg, FakePull([], error=ProviderBoom("api down")), [])
     assert outcome.status == "failed"
     assert "api down" in outcome.detail
+    # The outcome must not claim a release that did not happen, and the
+    # release failure itself must leave a trace.
+    assert "lease release failed" in outcome.detail
+    assert "2026-08-19T00:15:00+00:00" in outcome.detail
+    assert "could not release lease lease-1: release 500" in capsys.readouterr().err
+
+
+def test_failure_names_the_phase_and_rows_already_uploaded():
+    mg = FakeMeterGraph(_acquired())
+    mg.complete_error = MeterGraphSyncError("complete 500")
+    outcome = _run(mg, FakePull([{"request_id": "a"}, {"request_id": "b"}]), [])
+    assert outcome.status == "failed"
+    assert "during complete of window" in outcome.detail
+    assert outcome.pushed == 2
+    assert "2 row(s) already uploaded and will be re-sent and deduplicated" in outcome.detail
+
+    mg = FakeMeterGraph(_acquired())
+    outcome = _run(mg, FakePull([], error=ProviderBoom("api down")), [])
+    assert "during pull of window" in outcome.detail
+    assert "already uploaded" not in outcome.detail
+
+
+def test_push_that_does_not_account_for_every_row_never_completes():
+    mg = FakeMeterGraph(_acquired())
+    outcome = _run(
+        mg, FakePull([{"request_id": "a"}, {"request_id": "b"}]), [],
+        push=lambda path, token, base_url=None, on_progress=None: (0, 0),
+    )
+    assert (outcome.status, outcome.exit_code) == ("failed", 1)
+    assert "accounted for 0 of 2" in outcome.detail
+    assert mg.completed == [] and mg.abandoned == ["lease-1"]

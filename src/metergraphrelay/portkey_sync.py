@@ -28,10 +28,10 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from dataclasses import dataclass
 from typing import Callable
 
 from .metergraph_sync import LeaseLostError, MeterGraphSyncError
+from .sync_core import RENEW_INTERVAL_SECONDS, LeaseRenewer, SyncOutcome
 from .providers.portkey import (
     ImportContext,
     PortkeyConversionError,
@@ -40,6 +40,11 @@ from .providers.portkey import (
 from .providers.portkey_export import PAGE_SIZE_MAX, PortkeyExportError
 from .push import push_file
 from .window import TimeWindow, split_window
+
+# Kept as aliases so existing imports keep working; the definitions moved to
+# sync_core.py when the cursor-paged providers gained the same loop.
+_LeaseRenewer = LeaseRenewer
+__all__ = ["RENEW_INTERVAL_SECONDS", "SyncOutcome", "_LeaseRenewer", "run_portkey_sync"]
 
 PORTKEY_SOURCE = "portkey"
 # Decided from the draft's ``total``: <= threshold uses the hourly draft as-is;
@@ -51,49 +56,6 @@ PORTKEY_SOURCE = "portkey"
 VOLUME_SPLIT_THRESHOLD = PAGE_SIZE_MAX
 POLL_INTERVAL_SECONDS = 15.0
 MAX_POLL_SECONDS = 3300.0  # 55 min safety cap; renewal keeps the lease alive within it
-# Renew at most this often. Comfortably inside the server's 15-minute (900s) lease
-# so a renewal always lands before the lease could lapse, while never renewing more
-# than once per interval however frequently progress ticks arrive.
-RENEW_INTERVAL_SECONDS = 300.0
-
-
-@dataclass(frozen=True)
-class SyncOutcome:
-    status: str          # "completed" | "caught_up" | "busy" | "failed"
-    detail: str          # human-facing summary line
-    exit_code: int       # 0 for completed/caught_up/busy; 1 for failed
-    pushed: int = 0
-    failed: int = 0
-    skipped: int = 0
-
-
-class _LeaseRenewer:
-    """Renew a lease on a time-based cadence, driven by frequent progress ticks.
-
-    ``tick()`` is safe to call very often (per row, per 64 KiB download chunk); it
-    renews only when at least ``interval`` seconds of monotonic time have elapsed
-    since the last renewal — so it neither floods a fast phase nor lets a slow phase
-    outlive the lease. ``force()`` renews unconditionally (used at phase boundaries)
-    and resets the timer. A ``LeaseLostError`` (or any error) raised by the
-    underlying renew propagates to the caller, which treats a lost lease as a
-    handled, no-abandon failure.
-    """
-
-    def __init__(self, renew: Callable[[], object], *, clock: Callable[[], float], interval: float) -> None:
-        self._renew = renew
-        self._clock = clock
-        self._interval = interval
-        self._last = clock()
-
-    def tick(self) -> None:
-        now = self._clock()
-        if now - self._last >= self._interval:
-            self._renew()
-            self._last = self._clock()
-
-    def force(self) -> None:
-        self._renew()
-        self._last = self._clock()
 
 
 def run_portkey_sync(
@@ -148,7 +110,7 @@ def run_portkey_sync(
     def renew() -> None:
         mg_client.renew(lease.lease_id)
 
-    renewer = _LeaseRenewer(renew, clock=clock, interval=renew_interval_seconds)
+    renewer = LeaseRenewer(renew, clock=clock, interval=renew_interval_seconds)
     try:
         with tempfile.TemporaryDirectory(dir=work_dir) as staging:
             # 1) Plan from the draft total(s) — decides the split BEFORE starting
