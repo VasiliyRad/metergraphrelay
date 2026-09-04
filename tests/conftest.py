@@ -13,6 +13,8 @@ ENV_VARS_READ_BY_CLI = sorted(
         "BRAINTRUST_BASE_URL",
         "PHOENIX_BASE_URL",
         "PHOENIX_API_KEY",
+        "LANGSMITH_BASE_URL",
+        "LANGSMITH_ENDPOINT",
         "PORTKEY_WORKSPACE",
         "PORTKEY_BASE_URL",
     }

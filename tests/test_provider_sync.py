@@ -130,8 +130,8 @@ def _run(mg, pull, pushes, *, fail_rows=0, **overrides):
     return run_pull_sync(**kwargs)
 
 
-def test_sync_sources_are_the_three_cursor_paged_providers():
-    assert set(SYNC_SOURCES) == {"langfuse", "braintrust", "phoenix"}
+def test_sync_sources_are_the_cursor_paged_providers():
+    assert set(SYNC_SOURCES) == {"langfuse", "braintrust", "phoenix", "langsmith"}
 
 
 def test_rejects_a_source_outside_the_sync_set():

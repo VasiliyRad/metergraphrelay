@@ -1,6 +1,6 @@
 """CLI-independent sync orchestrator for the cursor-paged pull providers.
 
-Langfuse, Braintrust and Phoenix all answer a bounded time-range query with
+Langfuse, Braintrust, Phoenix and LangSmith all answer a bounded time-range query with
 cursor pagination, so one loop serves all three:
 
     acquire -> pull(window, +ImportContext, +renew) -> push(+renew) -> complete
@@ -44,7 +44,7 @@ from .sync_core import RENEW_INTERVAL_SECONDS, LeaseRenewer, SyncOutcome
 from .import_identity import ImportContext, ImportIdentityError
 from .push import push_file
 
-SYNC_SOURCES = ("langfuse", "braintrust", "phoenix")
+SYNC_SOURCES = ("langfuse", "braintrust", "phoenix", "langsmith")
 # Sync never caps rows: the server bounds the window in time, and every row in
 # it must land for the checkpoint to advance.
 UNBOUNDED_COUNT = 1_000_000_000

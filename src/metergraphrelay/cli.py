@@ -20,6 +20,7 @@ from .providers.braintrust import (
     pull_braintrust,
 )
 from .providers.langfuse import DEFAULT_LANGFUSE_HOST, LangfuseAPIError, pull_langfuse
+from .providers.langsmith import DEFAULT_LANGSMITH_URL, LangSmithAPIError, pull_langsmith
 from .providers.phoenix import DEFAULT_PHOENIX_URL, PhoenixAPIError, pull_phoenix
 from .providers.openai import pull_openai
 from .providers.portkey import convert_portkey_export
@@ -268,6 +269,92 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Braintrust API key (Bearer token). Overrides $BRAINTRUST_API_KEY "
             "/ .env if given; env/.env is the preferred path."
+        ),
+    )
+
+    pull_langsmith_parser = pull_subparsers.add_parser(
+        "langsmith",
+        description=(
+            "Pull LangSmith LLM runs (run_type = 'llm') from one or more "
+            "projects into a local JSONL file shaped for metergraph's ingest "
+            "API. Reads LangSmith's POST /runs/query endpoint. Only LLM runs "
+            "are imported: chain/tool/retriever/prompt runs and feedback are "
+            "never imported. WARNING: run inputs/outputs are transferred from "
+            "LangSmith into the local output file, and from there into "
+            "metergraph via `push`, with no opt-in gate."
+        ),
+        help=(
+            "Pull LLM runs from LangSmith projects (POST /runs/query); no "
+            "feedback, no non-LLM runs"
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "--project", action="append", required=True, metavar="PROJECT",
+        help=(
+            "LangSmith project to read runs from, by name or by project id "
+            "(both are accepted). Repeatable: projects are queried together. "
+            "Required."
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "-n", "--count", type=int, default=100,
+        help=(
+            "Maximum number of LLM runs to import (never a count of distinct "
+            "traces). (default: 100)"
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "--since", default=None,
+        help=(
+            "Only import runs that started at or after this ISO 8601 "
+            "timestamp (inclusive). (default: no lower bound)"
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "--until", default=None,
+        help=(
+            "Only import runs that started before this ISO 8601 timestamp "
+            "(exclusive). (default: the time this command started running, "
+            "captured once for the whole pull)"
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "--name", action="append", default=None, metavar="RUN_NAME",
+        help="Only import runs with this name. Repeatable; multiple values are OR'd.",
+    )
+    pull_langsmith_parser.add_argument(
+        "--tag", action="append", default=None, metavar="TAG",
+        help="Only import runs carrying this tag. Repeatable; all tags must be present (AND).",
+    )
+    pull_langsmith_parser.add_argument(
+        "--route", default=None,
+        help=(
+            "Override the metergraph route field for every imported row. "
+            "(default: the run's own name, else langsmith/backfill) Not a "
+            "selector — see --name, --tag and --project for choosing what is pulled."
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "--base-url", default=None,
+        help=(
+            "LangSmith API base URL. (default: $LANGSMITH_ENDPOINT or "
+            f"$LANGSMITH_BASE_URL if set, else {DEFAULT_LANGSMITH_URL}; the EU "
+            "host is https://eu.api.smith.langchain.com)"
+        ),
+    )
+    pull_langsmith_parser.add_argument(
+        "--output", default="./traces.jsonl",
+        help="Path to write the resulting JSONL file. (default: ./traces.jsonl)",
+    )
+    pull_langsmith_parser.add_argument(
+        "--env-file", default=".env",
+        help="Path to a .env file to load credentials from. (default: .env)",
+    )
+    pull_langsmith_parser.add_argument(
+        "--langsmith-api-key", default=None, metavar="KEY",
+        help=(
+            "LangSmith API key. Overrides $LANGSMITH_API_KEY / .env if given; "
+            "env/.env is the preferred path."
         ),
     )
 
@@ -615,6 +702,51 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    sync_langsmith_parser = sync_subparsers.add_parser(
+        "langsmith",
+        description=(
+            "Sync LangSmith LLM runs (run_type = 'llm') to metergraph in "
+            "server-coordinated cron mode: pull one logical time window (at "
+            "most one hour) from POST /runs/query and push it, with "
+            "acquire/resume/complete owned by the metergraph import-sync "
+            "server. Safe to run from cron, idempotent, no local checkpoint "
+            "files. Requires LANGSMITH_API_KEY and METERGRAPH_APP_TOKEN. "
+            "--source-scope is required and keys the checkpoint. "
+            "--initial-since seeds only the first run. Run content is "
+            "uploaded with no opt-out."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Sync LangSmith LLM runs to metergraph (server-coordinated cron mode)",
+    )
+    _add_sync_common(sync_langsmith_parser, scope_help=(
+        "Name of this sync stream on the metergraph side, e.g. the LangSmith "
+        "project name. Required. The checkpoint is keyed on it, so keep it "
+        "stable, and give each --name or --tag selector set its own scope."
+    ))
+    sync_langsmith_parser.add_argument(
+        "--project", action="append", required=True, metavar="PROJECT",
+        help="LangSmith project, by name or id. Repeatable. Required.",
+    )
+    sync_langsmith_parser.add_argument(
+        "--name", action="append", default=None, metavar="RUN_NAME",
+        help="Only sync runs with this name. Repeatable (OR).",
+    )
+    sync_langsmith_parser.add_argument(
+        "--tag", action="append", default=None, metavar="TAG",
+        help="Only sync runs carrying this tag. Repeatable (AND).",
+    )
+    sync_langsmith_parser.add_argument(
+        "--base-url", default=None,
+        help=(
+            "LangSmith API base URL. (default: $LANGSMITH_ENDPOINT or "
+            f"$LANGSMITH_BASE_URL if set, else {DEFAULT_LANGSMITH_URL})"
+        ),
+    )
+    sync_langsmith_parser.add_argument(
+        "--langsmith-api-key", default=None, metavar="KEY",
+        help="LangSmith API key. Overrides $LANGSMITH_API_KEY / .env if given.",
+    )
+
     demo_parser = subparsers.add_parser(
         "demo", help="Run 1-2 demo conversations with store=True"
     )
@@ -717,6 +849,26 @@ def _cleanup_temp_file(tmp_path: str) -> None:
         os.remove(tmp_path)
     except OSError:
         pass
+
+
+def _resolve_langsmith_credential(args: argparse.Namespace) -> str:
+    # Load the selected --env-file unconditionally, even when the flag is
+    # given, so optional settings such as LANGSMITH_ENDPOINT are read too.
+    load_dotenv(args.env_file, override=True)
+    if args.langsmith_api_key:
+        return args.langsmith_api_key
+    return require_credentials("langsmith", args.env_file)["LANGSMITH_API_KEY"]
+
+
+def _langsmith_base_url(args: argparse.Namespace) -> str:
+    # The LangSmith SDK's own variable is LANGSMITH_ENDPOINT; LANGSMITH_BASE_URL
+    # matches the relay's naming for the other providers.
+    return (
+        args.base_url
+        or os.environ.get("LANGSMITH_ENDPOINT")
+        or os.environ.get("LANGSMITH_BASE_URL")
+        or DEFAULT_LANGSMITH_URL
+    )
 
 
 def _run_sync_portkey(args: argparse.Namespace) -> int:
@@ -1102,6 +1254,63 @@ def _run_sync_phoenix(args: argparse.Namespace) -> int:
     )
 
 
+def _run_pull_langsmith(args: argparse.Namespace) -> int:
+    try:
+        api_key = _resolve_langsmith_credential(args)
+    except ConfigError as exc:
+        return _config_error(exc)
+    until = args.until or datetime.now(timezone.utc).isoformat()
+    try:
+        imported, skipped = pull_langsmith(
+            base_url=_langsmith_base_url(args),
+            api_key=api_key,
+            projects=args.project,
+            count=args.count,
+            since=args.since,
+            until=until,
+            names=args.name or [],
+            tags=args.tag or [],
+            route=args.route,
+            output_path=args.output,
+        )
+    except (LangSmithAPIError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Imported {imported} run(s), skipped {skipped}, to {args.output}")
+    return 0
+
+
+def _run_sync_langsmith(args: argparse.Namespace) -> int:
+    try:
+        api_key = _resolve_langsmith_credential(args)
+        push_creds = require_credentials("push", args.env_file)
+        source_scope = _require_source_scope(args)
+    except ConfigError as exc:
+        return _config_error(exc)
+    base_url = _langsmith_base_url(args)
+
+    def pull_window(*, window_start, window_end, output_path, import_context, on_progress):
+        return pull_langsmith(
+            base_url=base_url,
+            api_key=api_key,
+            projects=args.project,
+            count=UNBOUNDED_COUNT,
+            since=window_start,
+            until=window_end,
+            names=args.name or [],
+            tags=args.tag or [],
+            route=args.route,
+            output_path=output_path,
+            import_context=import_context,
+            on_progress=on_progress,
+        )
+
+    return _run_sync_pull(
+        args, source="langsmith", source_scope=source_scope, pull_window=pull_window,
+        provider_errors=(LangSmithAPIError,), push_token=push_creds["METERGRAPH_APP_TOKEN"],
+    )
+
+
 def _run_pull_phoenix(args: argparse.Namespace) -> int:
     # Phoenix needs no credential by default (a local server has auth off), so
     # the .env file is loaded for its optional settings rather than through
@@ -1150,6 +1359,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pull" and args.provider == "phoenix":
         return _run_pull_phoenix(args)
+
+    if args.command == "pull" and args.provider == "langsmith":
+        return _run_pull_langsmith(args)
+
+    if args.command == "sync" and args.provider == "langsmith":
+        return _run_sync_langsmith(args)
 
     if args.command == "sync" and args.provider == "langfuse":
         return _run_sync_langfuse(args)
