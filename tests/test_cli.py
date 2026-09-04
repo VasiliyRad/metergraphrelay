@@ -8,6 +8,7 @@ from metergraphrelay.cli import build_parser, main
 from metergraphrelay.portkey_sync import SyncOutcome
 from metergraphrelay.providers.braintrust import BraintrustAPIError
 from metergraphrelay.providers.langfuse import LangfuseAPIError
+from metergraphrelay.providers.langsmith import LangSmithAPIError
 from metergraphrelay.providers.phoenix import PhoenixAPIError
 
 
@@ -1671,7 +1672,7 @@ def test_sync_help_lists_every_provider(capsys):
     with pytest.raises(SystemExit):
         build_parser().parse_args(["sync", "--help"])
     out = capsys.readouterr().out
-    for name in ("openai", "portkey", "langfuse", "braintrust", "phoenix"):
+    for name in ("openai", "portkey", "langfuse", "braintrust", "phoenix", "langsmith"):
         assert name in out
 
 
@@ -1682,3 +1683,91 @@ def test_sync_allow_skipped_flag_is_forwarded(tmp_path):
         main(["sync", "phoenix", "--env-file", str(env_file), "--project", "p",
               "--source-scope", "p", "--allow-skipped"])
     assert run.call_args.kwargs["allow_skipped"] is True
+
+
+# --- langsmith ----------------------------------------------------------------
+
+
+def test_pull_langsmith_requires_credential_and_project(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    assert main(["pull", "langsmith", "--project", "p", "--env-file", str(env_file)]) == 1
+    assert "LANGSMITH_API_KEY" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "langsmith"])
+
+
+def test_pull_langsmith_dispatches_with_env_endpoint_and_selectors(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGSMITH_API_KEY=ls-key\nLANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com\n")
+    output = tmp_path / "out.jsonl"
+    with patch("metergraphrelay.cli.pull_langsmith", return_value=(3, 1)) as pull:
+        exit_code = main([
+            "pull", "langsmith", "--env-file", str(env_file), "--project", "mgsample",
+            "--project", "other", "--name", "support-desk/triage", "--tag", "prod",
+            "--since", "2026-09-01T00:00:00Z", "--until", "2026-09-02T00:00:00Z",
+            "-n", "7", "--route", "r", "--output", str(output),
+        ])
+    assert exit_code == 0
+    assert "Imported 3 run(s), skipped 1" in capsys.readouterr().out
+    kwargs = pull.call_args.kwargs
+    assert kwargs["base_url"] == "https://eu.api.smith.langchain.com"
+    assert kwargs["api_key"] == "ls-key"
+    assert kwargs["projects"] == ["mgsample", "other"]
+    assert kwargs["names"] == ["support-desk/triage"] and kwargs["tags"] == ["prod"]
+    assert (kwargs["since"], kwargs["until"], kwargs["count"], kwargs["route"]) == (
+        "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z", 7, "r")
+
+
+def test_pull_langsmith_defaults_to_the_us_host_and_flag_key_wins(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGSMITH_API_KEY=ls-env\n")
+    with patch("metergraphrelay.cli.pull_langsmith", return_value=(0, 0)) as pull:
+        main(["pull", "langsmith", "--env-file", str(env_file), "--project", "p",
+              "--langsmith-api-key", "ls-flag"])
+    assert pull.call_args.kwargs["base_url"] == "https://api.smith.langchain.com"
+    assert pull.call_args.kwargs["api_key"] == "ls-flag"
+
+
+def test_pull_langsmith_reports_api_errors(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGSMITH_API_KEY=ls-key\n")
+    with patch("metergraphrelay.cli.pull_langsmith",
+               side_effect=LangSmithAPIError("LangSmith API request failed: HTTP 401 Unauthorized")):
+        assert main(["pull", "langsmith", "--env-file", str(env_file), "--project", "p"]) == 1
+    assert "HTTP 401" in capsys.readouterr().err
+
+
+def test_sync_langsmith_dispatches_with_an_explicit_scope(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGSMITH_API_KEY=ls-key\nMETERGRAPH_APP_TOKEN=tok\n")
+    with patch("metergraphrelay.cli.run_pull_sync", return_value=_completed_outcome()) as run, patch(
+        "metergraphrelay.cli.pull_langsmith", return_value=(0, 0)
+    ) as pull:
+        assert main(["sync", "langsmith", "--env-file", str(env_file), "--source-scope", "mgsample",
+                     "--project", "mgsample", "--tag", "prod", "--initial-since", "2026-09-01T00:00:00Z"]) == 0
+        kwargs = run.call_args.kwargs
+        kwargs["pull_window"](window_start="s", window_end="e", output_path="o",
+                              import_context=None, on_progress=None)
+        pulled = pull.call_args.kwargs
+    assert kwargs["source"] == "langsmith" and kwargs["source_scope"] == "mgsample"
+    assert kwargs["provider_errors"] == (LangSmithAPIError,)
+    assert (pulled["since"], pulled["until"]) == ("s", "e")
+    assert pulled["count"] >= 1_000_000 and pulled["tags"] == ["prod"]
+
+
+def test_sync_langsmith_requires_a_scope(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LANGSMITH_API_KEY=ls-key\nMETERGRAPH_APP_TOKEN=tok\n")
+    with patch("metergraphrelay.cli.run_pull_sync") as run:
+        assert main(["sync", "langsmith", "--env-file", str(env_file), "--project", "p"]) == 1
+        assert "--source-scope is required" in capsys.readouterr().err
+        run.assert_not_called()
+
+
+def test_sync_langsmith_requires_the_langsmith_credential(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok\n")
+    assert main(["sync", "langsmith", "--env-file", str(env_file), "--project", "p",
+                 "--source-scope", "p"]) == 1
+    assert "LANGSMITH_API_KEY" in capsys.readouterr().err

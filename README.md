@@ -68,10 +68,12 @@ Before enabling this in production:
     metergraphrelay sync openai -n 25 --output my-traces.jsonl --route my-app/support-bot
     metergraphrelay pull braintrust --project my-project -n 25 --output my-traces.jsonl
     metergraphrelay pull phoenix --project my-project -n 25 --output my-traces.jsonl
+    metergraphrelay pull langsmith --project my-project -n 25 --output my-traces.jsonl
     metergraphrelay sync portkey export.jsonl --output converted.jsonl
     metergraphrelay sync langfuse --source-scope support-bot-prod --initial-since 2026-08-01T00:00:00+00:00 --tag prod
     metergraphrelay sync braintrust --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
     metergraphrelay sync phoenix --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
+    metergraphrelay sync langsmith --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
 
 `sync openai` accepts the same flags as `pull openai`. It pulls to
 `--output` and immediately pushes that same file, checking both
@@ -82,8 +84,9 @@ instead of pulling data it can't push.
 checks for `ANTHROPIC_API_KEY` and reports accordingly. `pull langfuse`
 is implemented — see [Pull from Langfuse](#pull-from-langfuse) below —
 as is `pull braintrust`, see
-[Pull from Braintrust](#pull-from-braintrust), and `pull phoenix`, see
-[Pull from Arize Phoenix](#pull-from-arize-phoenix).
+[Pull from Braintrust](#pull-from-braintrust), `pull phoenix`, see
+[Pull from Arize Phoenix](#pull-from-arize-phoenix), and `pull langsmith`,
+see [Pull from LangSmith](#pull-from-langsmith).
 `sync portkey` runs in two modes: give it a local `EXPORT_FILE` to
 convert a Portkey export you downloaded yourself
 ([Sync from Portkey](#sync-from-portkey)), or omit the file to pull a
@@ -343,6 +346,74 @@ There is no `sync phoenix` cron mode yet.
 
 Full flag reference: `metergraphrelay pull phoenix --help`.
 
+## Pull from LangSmith
+
+Import LangSmith **LLM runs** — the runs with `run_type = "llm"`, i.e. the
+model calls — into the same metergraph-native JSONL shape as the other
+pulls. Only LLM runs are imported: chain, tool, retriever and prompt runs
+are application structure, not model calls, and feedback is never imported.
+
+This reads LangSmith's **`POST /runs/query`** endpoint, resolving project
+names to ids through `GET /sessions` first.
+
+**Setup:** add your API key to `.env`. The US host is the default; set the
+endpoint for the EU region or a self-hosted deployment (`LANGSMITH_ENDPOINT`
+is the SDK's own variable name; `LANGSMITH_BASE_URL` works too):
+
+    LANGSMITH_API_KEY=lsv2_...
+    # LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+
+**Quickstart:**
+
+    metergraphrelay pull langsmith --project my-project -n 25 --output traces.jsonl
+    metergraphrelay push traces.jsonl
+
+`--project` is **required** and repeatable, by name or id.
+
+**Narrowing what gets pulled**, beyond `-n`/`--count`:
+
+    metergraphrelay pull langsmith --project my-project --since 2026-08-01T00:00:00Z --until 2026-08-07T00:00:00Z
+    metergraphrelay pull langsmith --project my-project --name ChatOpenAI --tag prod
+
+- `--since`/`--until` bound the run's start time (`--since` inclusive,
+  `--until` exclusive). `--until` defaults to the moment the command
+  started, captured once for the whole pull.
+- `--name` matches the run name. Repeatable; multiple values are **OR'd**.
+- `--tag` matches run tags. Repeatable; all values must be present (AND).
+- `--count` is always a cap on the number of **LLM runs** imported, never a
+  count of distinct traces.
+
+**Field mapping notes.**
+
+- `route` is the LLM run's own **name**, falling back to `langsmith/backfill`.
+  LangChain names the run after the model class (`ChatOpenAI`), and the
+  trace's root run, which would carry a workflow name, is a different row
+  this query never returns. `--route` overrides it for every imported row,
+  and the run name is then preserved under `tags.name`.
+- Token counts come from LangSmith's rolled-up `prompt_tokens` /
+  `completion_tokens` and the `prompt_token_details` /
+  `completion_token_details` buckets (`cache_read`, `cache_creation`,
+  `reasoning`), with the raw `usage_metadata` on the run as the fallback.
+  LangChain's `input_tokens` is the **total** with cache reads as a subset,
+  matching metergraph's convention, so the counts are carried across
+  unchanged.
+- `cost_usd` is LangSmith's `total_cost`. `latency_ms` comes from the run's
+  start and end. Model and provider come from `ls_model_name` /
+  `ls_provider` in the run metadata.
+- Run tags land under `tags.langsmith_tags`, and the source project under
+  `tags.langsmith_project_id`. LangSmith's naive UTC timestamps are given an
+  explicit offset.
+
+**Before running this against your own data:** `pull langsmith` transfers
+every matched run's inputs and outputs from LangSmith into your local JSONL
+file, and from there into metergraph via `push`, with no separate opt-in
+step.
+
+`sync langsmith` runs the server-coordinated cron mode described under
+[Sync from Langfuse, Braintrust and Phoenix](#sync-from-langfuse-braintrust-and-phoenix-cron-mode).
+
+Full flag reference: `metergraphrelay pull langsmith --help`.
+
 ## Sync from Portkey
 
 Convert a Portkey JSONL log export you've already downloaded into
@@ -465,7 +536,7 @@ Full flag reference: `metergraphrelay sync portkey --help`.
 
 ## Sync from Langfuse, Braintrust and Phoenix (cron mode)
 
-`sync langfuse`, `sync braintrust` and `sync phoenix` run the same
+`sync langfuse`, `sync braintrust`, `sync phoenix` and `sync langsmith` run the same
 server-coordinated loop as [Portkey's API cron mode](#sync-from-portkey-api-cron-mode),
 over each provider's own time-bounded, cursor-paged query. A run acquires a
 lease, pulls exactly the window the metergraph import-sync server hands it,
@@ -485,8 +556,8 @@ row in it must land before the checkpoint advances.
 
 **Credentials** are the same as for `pull`: Langfuse needs
 `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`, Braintrust needs
-`BRAINTRUST_API_KEY`, a local Phoenix needs nothing; all three need
-`METERGRAPH_APP_TOKEN`. `METERGRAPH_INGEST_URL` points every call at a
+`BRAINTRUST_API_KEY`, LangSmith needs `LANGSMITH_API_KEY`, a local Phoenix
+needs nothing; all of them need `METERGRAPH_APP_TOKEN`. `METERGRAPH_INGEST_URL` points every call at a
 self-hosted server.
 
 **`--source-scope`** is required. It names the checkpoint on the server,
@@ -499,7 +570,7 @@ would share a checkpoint and each would drop the other's rows.
 
 **Dedup.** Every synced row carries `import_source`, `import_source_scope`
 and `import_event_id` (the Langfuse observation id, the Braintrust row id,
-or the Phoenix span id), so a row re-pulled inside the overlap is
+the Phoenix span id, or the LangSmith run id), so a row re-pulled inside the overlap is
 deduplicated server-side and never double-counts. `pull` writes no such
 identity, so a `pull` followed by a `sync` over the same range does count
 twice.
@@ -527,8 +598,8 @@ and deduplicated.
     10 * * * * metergraphrelay sync phoenix   --source-scope my-project --initial-since 2026-08-01T00:00:00+00:00 --project my-project
 
 The server must allowlist the source: metergraph servers at or after
-migration `0072_import_sync_sources` accept `langfuse`, `braintrust` and
-`phoenix`; an older server answers acquire with 422 and the run exits
+migration `0072_import_sync_sources` accept `langfuse`, `braintrust`,
+`phoenix` and `langsmith`; an older server answers acquire with 422 and the run exits
 nonzero without touching anything.
 
 Full flag reference: `metergraphrelay sync <provider> --help`.
