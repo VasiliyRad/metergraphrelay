@@ -8,6 +8,7 @@ from metergraphrelay.cli import build_parser, main
 from metergraphrelay.portkey_sync import SyncOutcome
 from metergraphrelay.providers.braintrust import BraintrustAPIError
 from metergraphrelay.providers.langfuse import LangfuseAPIError
+from metergraphrelay.providers.phoenix import PhoenixAPIError
 
 
 def test_main_pull_openai_missing_credential_returns_error(tmp_path, capsys):
@@ -1320,3 +1321,147 @@ def test_readme_pull_braintrust_examples_parse_successfully():
             "2026-08-07T00:00:00Z",
         ]
     )
+
+
+def test_main_pull_phoenix_requires_a_project():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["pull", "phoenix"])
+
+
+def test_main_pull_phoenix_needs_no_credential_and_defaults_to_local(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    output_path = tmp_path / "out.jsonl"
+
+    with patch("metergraphrelay.cli.pull_phoenix", return_value=(4, 0)) as mock_pull:
+        exit_code = main(
+            [
+                "pull",
+                "phoenix",
+                "--env-file",
+                str(env_file),
+                "--project",
+                "mgsample",
+                "--project",
+                "other",
+                "--name",
+                "support-desk/triage",
+                "-n",
+                "4",
+                "--output",
+                str(output_path),
+                "--until",
+                "2026-09-01T00:00:00+00:00",
+            ]
+        )
+
+    assert exit_code == 0
+    mock_pull.assert_called_once_with(
+        base_url="http://localhost:6006",
+        api_key=None,
+        projects=["mgsample", "other"],
+        count=4,
+        since=None,
+        until="2026-09-01T00:00:00+00:00",
+        names=["support-desk/triage"],
+        route=None,
+        output_path=str(output_path),
+    )
+
+
+def test_main_pull_phoenix_reads_base_url_and_key_from_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PHOENIX_BASE_URL=https://phoenix.example.com\nPHOENIX_API_KEY=px-secret\n"
+    )
+
+    with patch("metergraphrelay.cli.pull_phoenix", return_value=(0, 0)) as mock_pull:
+        exit_code = main(
+            ["pull", "phoenix", "--env-file", str(env_file), "--project", "p"]
+        )
+
+    assert exit_code == 0
+    kwargs = mock_pull.call_args.kwargs
+    assert kwargs["base_url"] == "https://phoenix.example.com"
+    assert kwargs["api_key"] == "px-secret"
+    assert kwargs["count"] == 100
+
+
+def test_main_pull_phoenix_flags_take_precedence_over_env(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PHOENIX_BASE_URL=https://phoenix.example.com\nPHOENIX_API_KEY=px-env\n"
+    )
+
+    with patch("metergraphrelay.cli.pull_phoenix", return_value=(0, 0)) as mock_pull:
+        main(
+            [
+                "pull",
+                "phoenix",
+                "--env-file",
+                str(env_file),
+                "--project",
+                "p",
+                "--base-url",
+                "http://127.0.0.1:7007",
+                "--phoenix-api-key",
+                "px-flag",
+                "--route",
+                "my-app/reply",
+            ]
+        )
+
+    kwargs = mock_pull.call_args.kwargs
+    assert kwargs["base_url"] == "http://127.0.0.1:7007"
+    assert kwargs["api_key"] == "px-flag"
+    assert kwargs["route"] == "my-app/reply"
+
+
+def test_main_pull_phoenix_until_defaults_to_command_start_time(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    with patch("metergraphrelay.cli.pull_phoenix", return_value=(0, 0)) as mock_pull:
+        main(["pull", "phoenix", "--env-file", str(env_file), "--project", "p"])
+
+    until = mock_pull.call_args.kwargs["until"]
+    parsed = datetime.fromisoformat(until)
+    assert parsed.tzinfo is not None
+
+
+def test_main_pull_phoenix_reports_api_errors(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    with patch(
+        "metergraphrelay.cli.pull_phoenix",
+        side_effect=PhoenixAPIError("Phoenix API request failed: HTTP 404 Not Found"),
+    ):
+        exit_code = main(
+            ["pull", "phoenix", "--env-file", str(env_file), "--project", "p"]
+        )
+
+    assert exit_code == 1
+    assert "HTTP 404" in capsys.readouterr().err
+
+
+def test_main_pull_phoenix_prints_imported_and_skipped_summary(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+
+    with patch("metergraphrelay.cli.pull_phoenix", return_value=(7, 2)):
+        exit_code = main(
+            [
+                "pull",
+                "phoenix",
+                "--env-file",
+                str(env_file),
+                "--project",
+                "p",
+                "--output",
+                str(tmp_path / "o.jsonl"),
+            ]
+        )
+
+    assert exit_code == 0
+    assert "Imported 7 span(s), skipped 2" in capsys.readouterr().out
