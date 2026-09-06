@@ -11,10 +11,13 @@ from typing import Any, Callable
 from .. import __version__
 
 
-@dataclass(frozen=True)
-class ImportContext:
-    source: str
-    source_scope: str
+# Shared with the other sync providers; re-exported here for existing imports.
+from ..import_identity import (  # noqa: E402
+    IMPORT_EVENT_ID_MAX_LENGTH,
+    ImportContext,
+    ImportIdentityError,
+    canonical_import_event_id,
+)
 
 
 class PortkeyConversionError(ValueError):
@@ -94,7 +97,6 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
     return json.dumps(response), None
 
 
-IMPORT_EVENT_ID_MAX_LENGTH = 512
 
 _NUMERIC_TIMESTAMP_RE = re.compile(
     r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z"
@@ -127,24 +129,14 @@ _MONTHS = {
 def _canonical_import_event_id(raw: Any) -> str:
     """Validate a Portkey row id for use as ``import_event_id``.
 
-    metergraph-internal's import identity validator requires a string whose
-    stripped length is 1..512; a numeric, blank, or oversized id would make the
-    async import worker fail the whole batch *after* the relay has uploaded it.
-    Reject it here so API mode fails the window before upload. ``bool`` is an
-    ``int`` subclass, so it is rejected as a non-string.
+    Delegates to the shared validator; the error is re-raised as a
+    PortkeyConversionError so it fails the window like every other Portkey
+    conversion problem.
     """
-    if not isinstance(raw, str):
-        raise PortkeyConversionError(
-            f"import_event_id must be a string, got {type(raw).__name__}"
-        )
-    canonical = raw.strip()
-    if not 1 <= len(canonical) <= IMPORT_EVENT_ID_MAX_LENGTH:
-        raise PortkeyConversionError(
-            "import_event_id must be 1.."
-            f"{IMPORT_EVENT_ID_MAX_LENGTH} characters after stripping, "
-            f"got length {len(canonical)}"
-        )
-    return canonical
+    try:
+        return canonical_import_event_id(raw)
+    except ImportIdentityError as exc:
+        raise PortkeyConversionError(str(exc)) from exc
 
 
 def _canonical_timestamp(raw: Any) -> str:

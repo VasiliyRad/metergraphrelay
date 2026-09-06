@@ -8,9 +8,10 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from .. import __version__
+from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 OBSERVATIONS_PATH = "/api/public/v2/observations"
@@ -351,7 +352,10 @@ def map_usage_details(usage_details: Any) -> dict[str, int | None]:
 
 
 def normalize_observation(
-    observation: dict[str, Any], *, route_override: str | None
+    observation: dict[str, Any],
+    *,
+    route_override: str | None,
+    import_context: ImportContext | None = None,
 ) -> dict:
     trace_name = observation.get("traceName") or None
     own_name = observation.get("name") or None
@@ -383,7 +387,7 @@ def normalize_observation(
 
     model = _resolve_model_name(observation)
 
-    return {
+    row = {
         "ts": observation["startTime"],
         "source": "langfuse",
         "sdk": "metergraphrelay",
@@ -412,6 +416,14 @@ def normalize_observation(
         "session_id": observation.get("sessionId"),
         "environment": observation.get("environment"),
     }
+    if import_context is not None:
+        # The observation id is Langfuse's stable identity for this generation,
+        # so an overlap re-pull deduplicates on the server instead of double
+        # counting.
+        row["import_source"] = import_context.source
+        row["import_source_scope"] = import_context.source_scope
+        row["import_event_id"] = canonical_import_event_id(observation.get("id"))
+    return row
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:
@@ -434,6 +446,8 @@ def pull_langfuse(
     environment: str | None,
     route: str | None,
     output_path: str,
+    import_context: ImportContext | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     base_params = build_base_params(
         until=until,
@@ -471,6 +485,8 @@ def pull_langfuse(
                     secret_key=secret_key,
                     params=page_params,
                 )
+                if on_progress is not None:
+                    on_progress()  # a page fetch is progress too
                 observations = payload["data"]
                 if not observations:
                     break
@@ -478,10 +494,16 @@ def pull_langfuse(
                     if imported >= count:
                         break
                     try:
-                        row = normalize_observation(observation, route_override=route)
+                        row = normalize_observation(
+                            observation,
+                            route_override=route,
+                            import_context=import_context,
+                        )
                         line = json.dumps(row)
                     except (KeyError, TypeError, AttributeError) as exc:
                         skipped += 1
+                        if on_progress is not None:
+                            on_progress()
                         obs_id = (
                             observation.get("id", "<unknown>")
                             if isinstance(observation, dict)
@@ -494,6 +516,8 @@ def pull_langfuse(
                         continue
                     f.write(line + "\n")
                     imported += 1
+                    if on_progress is not None:
+                        on_progress()
                 raw_cursor = payload.get("meta", {}).get("cursor")
                 if raw_cursor is not None and not (
                     isinstance(raw_cursor, str) and raw_cursor

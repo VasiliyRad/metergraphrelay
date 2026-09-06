@@ -6,9 +6,10 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from .. import __version__
+from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
 
 # Braintrust's US data plane. The EU plane (https://api-eu.braintrust.dev) and a
@@ -445,7 +446,12 @@ def _cost_usd(span: dict[str, Any], metrics: Any) -> float | int | None:
     return None
 
 
-def normalize_span(span: dict[str, Any], *, route_override: str | None) -> dict:
+def normalize_span(
+    span: dict[str, Any],
+    *,
+    route_override: str | None,
+    import_context: ImportContext | None = None,
+) -> dict:
     span_attributes = span.get("span_attributes")
     span_attributes = span_attributes if isinstance(span_attributes, dict) else {}
     raw_name = span_attributes.get("name")
@@ -487,7 +493,7 @@ def normalize_span(span: dict[str, Any], *, route_override: str | None) -> dict:
         else None
     )
 
-    return {
+    row = {
         # Braintrust's documented `created` carries an explicit `+00:00` offset,
         # but a `Z` designator would be parsed by `datetime.fromisoformat` only
         # on Python 3.11+; a 3.10 consumer (the OSS server supports 3.10) fails
@@ -524,6 +530,13 @@ def normalize_span(span: dict[str, Any], *, route_override: str | None) -> dict:
         "span_id": span.get("span_id") or span["id"],
         "parent_span_id": parent_span_id,
     }
+    if import_context is not None:
+        # The row id is Braintrust's stable identity for this span, so an
+        # overlap re-pull deduplicates on the server instead of double counting.
+        row["import_source"] = import_context.source
+        row["import_source_scope"] = import_context.source_scope
+        row["import_event_id"] = canonical_import_event_id(span.get("id"))
+    return row
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:
@@ -543,6 +556,8 @@ def pull_braintrust(
     until: str,
     route: str | None,
     output_path: str,
+    import_context: ImportContext | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     imported = 0
     skipped = 0
@@ -578,16 +593,22 @@ def pull_braintrust(
                 spans, cursor = fetch_spans_page(
                     base_url, api_key=api_key, query=query
                 )
+                if on_progress is not None:
+                    on_progress()  # a page fetch is progress too
                 if not spans:
                     break
                 for span in spans:
                     if imported >= count:
                         break
                     try:
-                        row = normalize_span(span, route_override=route)
+                        row = normalize_span(
+                            span, route_override=route, import_context=import_context
+                        )
                         line = json.dumps(row)
                     except (KeyError, TypeError, AttributeError) as exc:
                         skipped += 1
+                        if on_progress is not None:
+                            on_progress()
                         span_id = (
                             span.get("id", "<unknown>")
                             if isinstance(span, dict)
@@ -600,6 +621,8 @@ def pull_braintrust(
                         continue
                     f.write(line + "\n")
                     imported += 1
+                    if on_progress is not None:
+                        on_progress()
                 if not cursor:
                     break
         os.replace(tmp_path, output_path)

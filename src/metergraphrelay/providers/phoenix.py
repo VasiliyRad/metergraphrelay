@@ -31,10 +31,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from .. import __version__
 from ..window import normalize_utc_designator
+from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_PHOENIX_URL = "http://localhost:6006"
 SPANS_PATH_TEMPLATE = "/v1/projects/{project}/spans"
@@ -329,7 +330,11 @@ def _resolve_route(
 
 
 def normalize_span(
-    span: dict[str, Any], *, project: str, route_override: str | None
+    span: dict[str, Any],
+    *,
+    project: str,
+    route_override: str | None,
+    import_context: ImportContext | None = None,
 ) -> dict:
     attributes = _attributes(span)
     raw_name = span.get("name")
@@ -353,7 +358,7 @@ def normalize_span(
     context = context if isinstance(context, dict) else {}
     span_id = context.get("span_id") or span["id"]
 
-    return {
+    row = {
         "ts": normalize_utc_designator(span["start_time"]),
         "source": "phoenix",
         "sdk": "metergraphrelay",
@@ -384,6 +389,13 @@ def normalize_span(
         "span_id": span_id,
         "parent_span_id": span.get("parent_id"),
     }
+    if import_context is not None:
+        # The OpenTelemetry span id is stable across re-reads of the same
+        # span, so an overlap re-pull deduplicates on the server.
+        row["import_source"] = import_context.source
+        row["import_source_scope"] = import_context.source_scope
+        row["import_event_id"] = canonical_import_event_id(span_id)
+    return row
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:
@@ -404,6 +416,8 @@ def pull_phoenix(
     names: list[str],
     route: str | None,
     output_path: str,
+    import_context: ImportContext | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     """Pull up to ``count`` LLM spans across ``projects`` into ``output_path``.
 
@@ -443,6 +457,8 @@ def pull_phoenix(
                     spans, cursor = fetch_spans_page(
                         base_url, project=project, api_key=api_key, params=params
                     )
+                    if on_progress is not None:
+                        on_progress()  # a page fetch is progress too
                     if not spans:
                         break
                     for span in spans:
@@ -456,11 +472,16 @@ def pull_phoenix(
                             continue
                         try:
                             row = normalize_span(
-                                span, project=project, route_override=route
+                                span,
+                                project=project,
+                                route_override=route,
+                                import_context=import_context,
                             )
                             line = json.dumps(row)
                         except (KeyError, TypeError, AttributeError) as exc:
                             skipped += 1
+                            if on_progress is not None:
+                                on_progress()
                             span_id = (
                                 span.get("id", "<unknown>")
                                 if isinstance(span, dict)
@@ -473,6 +494,8 @@ def pull_phoenix(
                             continue
                         f.write(line + "\n")
                         imported += 1
+                        if on_progress is not None:
+                            on_progress()
                     if not cursor:
                         break
         os.replace(tmp_path, output_path)
