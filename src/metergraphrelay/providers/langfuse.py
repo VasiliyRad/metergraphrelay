@@ -252,6 +252,104 @@ def _response_text(output_value: Any) -> str | None:
     return json.dumps(output_value)
 
 
+# Langfuse stores usageDetails FLAT: its ingestion normalizes provider usage
+# into one level of integer buckets and drops nested objects. Which keys appear
+# depends on the integration that recorded the observation:
+#
+#   openai wrapper   -- ingestion renames prompt/completion to "input"/"output"
+#                       and flattens details as input_cached_tokens /
+#                       output_reasoning_tokens, each SUBTRACTED from its parent.
+#   langchain        -- the callback handler flattens usage_metadata details as
+#                       input_cache_read / input_cache_creation /
+#                       output_reasoning, likewise subtracted.
+#   gateway fallthrough -- a response the wrapper schema rejects keeps the raw
+#                       prompt_tokens / completion_tokens, inclusive totals with
+#                       the details dropped.
+#   native SDK       -- whatever the caller passed to update(usage_details=...),
+#                       e.g. Anthropic's input_tokens + cache_read_input_tokens.
+#   gemini           -- promptTokenCount / candidatesTokenCount / thoughts_token_count.
+#
+# Langfuse's own contract is that every key is a non-overlapping bucket and the
+# total is their sum. metergraph's convention is that input_tokens is the total
+# with cache_read / cache_write / reasoning as subsets of it, so the named total
+# key has every other *input* bucket added back (Langfuse itself sums by the
+# "input" substring). Priority-tier buckets are pricing markers that overlap
+# the parent, not exclusive sub-buckets, so they are left out of the sum.
+_INPUT_TOTAL_KEYS = (
+    "input", "input_tokens", "prompt_tokens", "promptTokenCount", "prompt_token_count",
+)
+_OUTPUT_TOTAL_KEYS = (
+    "output", "output_tokens", "completion_tokens", "candidatesTokenCount",
+    "candidates_token_count",
+)
+_CACHE_READ_KEYS = (
+    "input_cached_tokens", "input_cache_read", "cache_read_input_tokens",
+    "cachedContentTokenCount", "cached_content_token_count",
+)
+_CACHE_WRITE_KEYS = (
+    "input_cache_creation_tokens", "input_cache_creation", "cache_creation_input_tokens",
+)
+_REASONING_KEYS = (
+    "output_reasoning_tokens", "output_reasoning", "thoughtsTokenCount",
+    "thoughts_token_count",
+)
+_NON_BUCKET_MARKERS = ("priority",)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _first_int_key(source: dict[str, Any], keys: tuple[str, ...]) -> tuple[str | None, int | None]:
+    for key in keys:
+        value = source.get(key)
+        if _is_int(value):
+            return key, value
+    return None, None
+
+
+def _first_int(source: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    return _first_int_key(source, keys)[1]
+
+
+def _total_with_buckets(
+    usage_details: dict[str, Any], total_keys: tuple[str, ...], marker: str
+) -> int | None:
+    """The named total plus every other integer bucket carrying ``marker``."""
+    total_key, total = _first_int_key(usage_details, total_keys)
+    if total_key is None:
+        return None
+    for key, value in usage_details.items():
+        if key == total_key or not _is_int(value):
+            continue
+        lowered = key.lower()
+        if marker not in lowered:
+            continue
+        if any(skip in lowered for skip in _NON_BUCKET_MARKERS):
+            continue
+        total += value
+    return total
+
+
+def map_usage_details(usage_details: Any) -> dict[str, int | None]:
+    """Map one observation's usageDetails onto metergraph token fields."""
+    if not isinstance(usage_details, dict):
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+            "reasoning_tokens": None,
+        }
+    return {
+        "input_tokens": _total_with_buckets(usage_details, _INPUT_TOTAL_KEYS, "input"),
+        "output_tokens": _total_with_buckets(usage_details, _OUTPUT_TOTAL_KEYS, "output"),
+        "cache_read_tokens": _first_int(usage_details, _CACHE_READ_KEYS),
+        "cache_write_tokens": _first_int(usage_details, _CACHE_WRITE_KEYS),
+        "reasoning_tokens": _first_int(usage_details, _REASONING_KEYS),
+    }
+
+
 def normalize_observation(
     observation: dict[str, Any], *, route_override: str | None
 ) -> dict:
@@ -279,8 +377,7 @@ def normalize_observation(
         raw_status_message if error and isinstance(raw_status_message, str) else None
     )
 
-    raw_usage_details = observation.get("usageDetails")
-    usage_details = raw_usage_details if isinstance(raw_usage_details, dict) else {}
+    usage = map_usage_details(observation.get("usageDetails"))
     request_json, request_text = _map_content(observation.get("input"))
     response_text = _response_text(observation.get("output"))
 
@@ -294,8 +391,11 @@ def normalize_observation(
         "provider": infer_provider(observation),
         "model": model,
         "status": "error" if error else "success",
-        "input_tokens": usage_details.get("input"),
-        "output_tokens": usage_details.get("output"),
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "cache_read_tokens": usage["cache_read_tokens"],
+        "cache_write_tokens": usage["cache_write_tokens"],
+        "reasoning_tokens": usage["reasoning_tokens"],
         "cost_usd": observation.get("totalCost"),
         "error": error,
         "error_type": error_type,
