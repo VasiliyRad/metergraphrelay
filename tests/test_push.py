@@ -155,6 +155,26 @@ def test_push_file_http_error_fails_the_whole_batch(tmp_path, capsys):
     assert "401" in capsys.readouterr().err
 
 
+def test_push_file_drops_a_non_object_row_without_poisoning_its_batch(tmp_path, capsys):
+    """A bare `null` (or any valid-JSON-but-not-an-object value) must not
+    reach the batch: the server rejects the WHOLE request if any row in it
+    isn't an object, so one such line would otherwise fail every valid row
+    sharing its batch, not just itself."""
+    file_path = tmp_path / "traces.jsonl"
+    file_path.write_text('{"a": 1}\nnull\n{"a": 2}\n')
+
+    with patch("metergraphrelay.push.urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _mock_response(202, accepted=2)
+        succeeded, failed = push_file(str(file_path), token="tok-123")
+
+    assert succeeded == 2
+    assert failed == 1
+    assert mock_urlopen.call_count == 1  # the two valid rows still batch together
+    body = json.loads(mock_urlopen.call_args_list[0].args[0].data)
+    assert body["rows"] == [{"a": 1}, {"a": 2}]  # null never reached the batch
+    assert "line 2" in capsys.readouterr().err
+
+
 def test_push_file_counts_malformed_json_line_and_continues(tmp_path, capsys):
     file_path = tmp_path / "traces.jsonl"
     file_path.write_text('{"a": 1}\nnot json at all\n{"a": 2}\n')

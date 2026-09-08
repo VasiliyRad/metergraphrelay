@@ -110,6 +110,18 @@ def push_file(
                     file=sys.stderr,
                 )
                 continue
+            if not isinstance(row, dict):
+                # Valid JSON (null, a number, a string, a list, ...) is not a
+                # valid row -- the server rejects a whole batch if any row in
+                # it isn't an object. Drop it here, before it can poison every
+                # other row sharing its batch.
+                failed += 1
+                print(
+                    f"Warning: skipping non-object row on line {line_number}: "
+                    f"expected an object, got {type(row).__name__}",
+                    file=sys.stderr,
+                )
+                continue
             encoded_size = len(json.dumps(row).encode())
             if batch and (
                 len(batch) >= max_rows_per_batch
