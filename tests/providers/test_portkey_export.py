@@ -70,7 +70,8 @@ def test_create_export_sends_filters_requested_data_and_api_key_header():
     assert sent["filters"]["time_of_generation_min"] == W_MIN
     assert sent["filters"]["time_of_generation_max"] == W_MAX
     assert sent["filters"]["page_size"] == 50000
-    assert sent["filters"]["current_page"] == 1
+    # Zero-based: page 1 would be the (empty) second page of the export.
+    assert sent["filters"]["current_page"] == 0
     # requested_data pulls exactly the fields the normalizer consumes.
     assert "created_at" in sent["requested_data"]
     assert "response_status_code" in sent["requested_data"]

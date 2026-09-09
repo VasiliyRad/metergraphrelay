@@ -127,7 +127,12 @@ class PortkeyExportClient:
                 "time_of_generation_min": window_start,
                 "time_of_generation_max": window_end,
                 "page_size": PAGE_SIZE_MAX,
-                "current_page": 1,
+                # Portkey numbers export pages from zero. Page 1 is the second
+                # page of a single-page export: Portkey fails that job, or on
+                # some windows produces an empty file, so nothing with rows
+                # ever imports. Every export made from Portkey's own UI
+                # carries page 0.
+                "current_page": 0,
             },
             "requested_data": list(REQUESTED_DATA),
             "description": EXPORT_DESCRIPTION,
