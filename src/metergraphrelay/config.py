@@ -14,6 +14,7 @@ CREDENTIAL_SPECS: dict[str, list[str]] = {
     "anthropic": ["ANTHROPIC_API_KEY"],
     "langfuse": ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
     "braintrust": ["BRAINTRUST_API_KEY"],
+    "langsmith": ["LANGSMITH_API_KEY"],
     "portkey": ["PORTKEY_API_KEY"],
     "push": ["METERGRAPH_APP_TOKEN"],
 }
