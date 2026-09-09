@@ -6,9 +6,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable
 
 from .. import __version__
+from ..window import normalize_utc_designator
 
 # Docs-verified Portkey beta Logs Export contract
 # (/api-reference/admin-api/data-plane/logs/log-exports-beta/).
@@ -64,6 +66,26 @@ class PortkeyExport:
     @property
     def is_success(self) -> bool:
         return self.status == STATUS_SUCCESS
+
+
+def portkey_timestamp(value: str) -> str:
+    """An aware ISO 8601 instant in the form Portkey's export job accepts.
+
+    The draft endpoint accepts any aware ISO string and counts the rows, but
+    the job that runs the export fails, with no reason given, when the
+    filter carries a numeric offset such as ``+00:00``, which is what
+    ``datetime.isoformat`` produces. Portkey's own UI sends ``Z``. So the
+    instant is converted to UTC and written with a ``Z`` designator.
+    """
+    normalized = normalize_utc_designator(value)
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PortkeyExportError(f"export window bound must be an aware ISO 8601 instant: {value!r}")
+    parsed = parsed.astimezone(timezone.utc)
+    text = parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    if parsed.microsecond:
+        text += f".{parsed.microsecond:06d}".rstrip("0")
+    return text + "Z"
 
 
 class PortkeyExportClient:
@@ -124,8 +146,8 @@ class PortkeyExportClient:
     def create_export(self, *, window_start: str, window_end: str) -> PortkeyExport:
         body = {
             "filters": {
-                "time_of_generation_min": window_start,
-                "time_of_generation_max": window_end,
+                "time_of_generation_min": portkey_timestamp(window_start),
+                "time_of_generation_max": portkey_timestamp(window_end),
                 "page_size": PAGE_SIZE_MAX,
                 # Portkey numbers export pages from zero. Page 1 is the second
                 # page of a single-page export: Portkey fails that job, or on
