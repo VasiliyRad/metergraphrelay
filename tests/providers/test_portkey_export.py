@@ -6,10 +6,10 @@ import pytest
 
 from metergraphrelay import __version__ as PKG_VERSION
 from metergraphrelay.providers.portkey_export import (
-    STATUS_SUCCESS,
     PortkeyExport,
     PortkeyExportClient,
     PortkeyExportError,
+    portkey_timestamp,
 )
 
 # The stable, explicit User-Agent must be derived from the package name/version
@@ -67,10 +67,13 @@ def test_create_export_sends_filters_requested_data_and_api_key_header():
     assert request.get_header("X-portkey-api-key") == "pk-secret"  # urllib title-cases header keys
     sent = json.loads(request.data)
     assert sent["workspace_id"] == "ws-acme"
-    assert sent["filters"]["time_of_generation_min"] == W_MIN
-    assert sent["filters"]["time_of_generation_max"] == W_MAX
+    # Portkey's export job fails on a numeric offset; the bounds go out with Z.
+    assert sent["filters"]["time_of_generation_min"] == portkey_timestamp(W_MIN)
+    assert sent["filters"]["time_of_generation_max"] == portkey_timestamp(W_MAX)
+    assert sent["filters"]["time_of_generation_min"].endswith("Z")
     assert sent["filters"]["page_size"] == 50000
-    assert sent["filters"]["current_page"] == 1
+    # Zero-based: page 1 would be the (empty) second page of the export.
+    assert sent["filters"]["current_page"] == 0
     # requested_data pulls exactly the fields the normalizer consumes.
     assert "created_at" in sent["requested_data"]
     assert "response_status_code" in sent["requested_data"]
@@ -381,3 +384,21 @@ def test_create_export_body_includes_nonsensitive_description():
     # It must never leak tenant/workspace identifiers or key material.
     assert "ws-acme" not in description
     assert "pk-secret" not in description
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("2026-09-09T17:47:52+00:00", "2026-09-09T17:47:52Z"),
+        ("2026-09-09T17:47:52Z", "2026-09-09T17:47:52Z"),
+        ("2026-09-09T19:47:52+02:00", "2026-09-09T17:47:52Z"),
+        ("2026-09-09T17:47:52.174000+00:00", "2026-09-09T17:47:52.174Z"),
+    ],
+)
+def test_export_window_bounds_are_sent_as_utc_with_z(value, expected):
+    assert portkey_timestamp(value) == expected
+
+
+def test_naive_window_bounds_are_refused():
+    with pytest.raises(PortkeyExportError, match="aware"):
+        portkey_timestamp("2026-09-09T17:47:52")
