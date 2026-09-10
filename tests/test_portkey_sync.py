@@ -611,11 +611,27 @@ def test_export_terminal_failure_status_abandons_lease_and_reports_clearly():
     assert "exp-1" in outcome.detail          # names the offending export
 
 
-def test_poll_timeout_abandons_lease_and_reports_safety_cap():
-    class StuckExports(FakePortkey):
-        def get_export(self, export_id):
-            return PortkeyExport(export_id=export_id, total=None, status=STATUS_IN_PROGRESS)
+class StuckExports(FakePortkey):
+    """An export that is accepted and started but never reaches a terminal state.
 
+    ``answer_seconds`` is how long the status endpoint itself blocks, which a busy
+    Portkey workspace has been measured doing for over two minutes at a time.
+    """
+
+    def __init__(self, rows_by_window, *, clock=None, answer_seconds=0.0):
+        super().__init__(rows_by_window)
+        self._clock = clock
+        self._answer_seconds = answer_seconds
+        self.polls = 0
+
+    def get_export(self, export_id):
+        self.polls += 1
+        if self._clock is not None and self._answer_seconds:
+            self._clock.advance(self._answer_seconds)
+        return PortkeyExport(export_id=export_id, total=None, status=STATUS_IN_PROGRESS)
+
+
+def test_poll_timeout_abandons_lease_and_names_the_unfinished_export():
     pk = StuckExports({(WINDOW_START, WINDOW_END): [_portkey_row("r1")]})
     mg = FakeMeterGraph(_acquired())
 
@@ -628,6 +644,34 @@ def test_poll_timeout_abandons_lease_and_reports_safety_cap():
     assert mg.completed == []
     assert mg.abandoned == ["lease-1"]
     assert "cap" in outcome.detail.lower() or "15" in outcome.detail
+    # The export and the state it was last seen in: the difference between a
+    # provider that is slow and one that is stuck.
+    assert "exp-1 (in_progress)" in outcome.detail
+
+
+def test_the_cap_counts_wall_clock_so_slow_status_answers_cannot_outrun_it():
+    """Summing the sleeps understates polling by however long each answer took.
+
+    With a status endpoint that blocks for a minute per poll, a cap counted from
+    the sleeps alone is reached five times later in wall clock than the number it
+    names, so the run holds its lease and its budget long past the limit.
+    """
+    clock = FakeClock()
+    pk = StuckExports(
+        {(WINDOW_START, WINDOW_END): [_portkey_row("r1")]}, clock=clock, answer_seconds=60.0
+    )
+    mg = FakeMeterGraph(_acquired())
+
+    outcome = _run(
+        mg, pk, [], clock=clock, sleep=lambda _s: None,
+        poll_interval_seconds=15.0, max_poll_seconds=100.0,
+    )
+
+    assert outcome.status == "failed" and mg.abandoned == ["lease-1"]
+    assert "exp-1 (in_progress)" in outcome.detail
+    # Two polls, 120 s of wall clock, past the 100 s cap. Only 15 s of that was
+    # sleeping, so the old summed-interval count would have polled on for hours.
+    assert pk.polls == 2 and clock() == 120.0
 
 
 # -- lease renewal (time-based, driven through every long phase) -----------
