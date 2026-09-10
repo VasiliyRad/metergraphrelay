@@ -55,7 +55,7 @@ PORTKEY_SOURCE = "portkey"
 # for the threshold to silently drift above the page size and drop rows.
 VOLUME_SPLIT_THRESHOLD = PAGE_SIZE_MAX
 POLL_INTERVAL_SECONDS = 15.0
-MAX_POLL_SECONDS = 3300.0  # 55 min safety cap; renewal keeps the lease alive within it
+MAX_POLL_SECONDS = 3300.0  # 55 min of wall clock; renewal keeps the lease alive within it
 
 
 def run_portkey_sync(
@@ -124,7 +124,7 @@ def run_portkey_sync(
             renewer.force()  # submission finished — force a renewal entering the poll phase
             _poll_all(
                 export_ids, pk_client, renewer,
-                sleep, poll_interval_seconds, max_poll_seconds,
+                sleep, poll_interval_seconds, max_poll_seconds, clock,
             )
             # 3) Download -> normalize(+ImportContext) -> push, renewing throughout.
             renewer.force()  # entering the download/normalize/upload phase
@@ -227,26 +227,40 @@ def _plan_exports(pk_client, lease, created_export_ids: list[str], renewer) -> l
     return export_ids
 
 
-def _poll_all(export_ids, pk_client, renewer, sleep, poll_interval, max_poll_seconds) -> None:
+def _poll_all(export_ids, pk_client, renewer, sleep, poll_interval, max_poll_seconds, clock) -> None:
     """Poll every export to a terminal state, renewing the lease on a time cadence.
 
-    Elapsed time is tracked by summing the poll interval (no wall clock) and bounded
-    by ``max_poll_seconds``. Any export that reaches a terminal state other than
-    success fails the run with a clear, export-naming error.
+    Bounded by ``max_poll_seconds`` of wall clock, read from the injected monotonic
+    clock. A status poll can itself block for minutes on a busy workspace, so summing
+    only the sleeps between polls understates the real polling time by however long
+    the provider took to answer: with answers that slow, a cap counted that way is
+    reached hours after the elapsed time it names, which is no cap at all. The summed
+    interval is kept as a floor so a caller whose sleep does not advance its clock
+    still reaches the cap instead of spinning.
+
+    The cap names the exports still unfinished and the state each was last seen in,
+    because that is what says whether the provider is slow or stuck. Any export that
+    reaches a terminal state other than success fails the run with a clear,
+    export-naming error.
     """
-    elapsed = 0.0
+    started = clock()
+    slept = 0.0
     states = {eid: pk_client.get_export(eid) for eid in export_ids}
     while not all(e.is_terminal for e in states.values()):
         sleep(poll_interval)
-        elapsed += poll_interval
+        slept += poll_interval
         renewer.tick()  # keep the lease alive across the whole poll loop
         states = {
             eid: (e if e.is_terminal else pk_client.get_export(eid))
             for eid, e in states.items()
         }
-        if elapsed >= max_poll_seconds:
+        if max(clock() - started, slept) >= max_poll_seconds:
+            pending = ", ".join(
+                f"{eid} ({e.status})" for eid, e in states.items() if not e.is_terminal
+            )
             raise PortkeyExportError(
-                f"Portkey export polling exceeded {max_poll_seconds}s safety cap"
+                f"Portkey export polling exceeded the {max_poll_seconds:g}s cap; "
+                f"still unfinished: {pending}"
             )
     failures = [eid for eid, e in states.items() if not e.is_success]
     if failures:
