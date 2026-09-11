@@ -335,8 +335,6 @@ def test_normalize_portkey_row_anthropic_native_tools():
 
 
 def test_normalize_portkey_row_google_vertex_anthropic_route_emits_vertex_ai_provider():
-    # Demonstrated row: an Anthropic model served via the Google Vertex messages
-    # route. Vertex bills this, so provider must become vertex-ai for catalog match.
     row = _anthropic_row(
         ai_model="claude-opus-4-6",
         metadata={"workflow_name": "googleVertex.anthropic.messages"},
@@ -347,12 +345,10 @@ def test_normalize_portkey_row_google_vertex_anthropic_route_emits_vertex_ai_pro
     assert result["provider"] == "vertex-ai"
     assert result["model"] == "claude-opus-4-6"
     assert result["route"] == "googleVertex.anthropic.messages"
-    # The provider rule must not touch prompt/response content.
     assert result["response_text"] == "Let me check that for you."
 
 
 def test_normalize_portkey_row_direct_anthropic_route_keeps_anthropic_provider():
-    # A non-Vertex Anthropic route is unaffected: provider stays anthropic.
     result = normalize_portkey_row(_anthropic_row())
 
     assert result["provider"] == "anthropic"

@@ -222,8 +222,7 @@ def _timestamp_from_epoch(numeric: float, raw: Any) -> datetime:
         ) from exc
 
 
-# Portkey route for Anthropic models proxied through Google Vertex. Vertex bills
-# these, so the emitted provider must be vertex-ai for catalog selection.
+# Vertex-billed Anthropic route.
 _GOOGLE_VERTEX_ANTHROPIC_ROUTE = "googleVertex.anthropic.messages"
 
 
