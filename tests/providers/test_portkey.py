@@ -334,6 +334,27 @@ def test_normalize_portkey_row_anthropic_native_tools():
     assert result["tool_names"] == ["get_weather"]
 
 
+def test_normalize_portkey_row_google_vertex_anthropic_route_emits_vertex_ai_provider():
+    row = _anthropic_row(
+        ai_model="claude-opus-4-6",
+        metadata={"workflow_name": "googleVertex.anthropic.messages"},
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["provider"] == "vertex-ai"
+    assert result["model"] == "claude-opus-4-6"
+    assert result["route"] == "googleVertex.anthropic.messages"
+    assert result["response_text"] == "Let me check that for you."
+
+
+def test_normalize_portkey_row_direct_anthropic_route_keeps_anthropic_provider():
+    result = normalize_portkey_row(_anthropic_row())
+
+    assert result["provider"] == "anthropic"
+    assert result["route"] == "weather-bot"
+
+
 def test_normalize_portkey_row_chat_completions_with_function_tool_calls():
     row = _chat_completion_row(
         ai_org="openai",

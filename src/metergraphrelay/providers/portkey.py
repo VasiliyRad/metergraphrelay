@@ -222,6 +222,10 @@ def _timestamp_from_epoch(numeric: float, raw: Any) -> datetime:
         ) from exc
 
 
+# Vertex-billed Anthropic route.
+_GOOGLE_VERTEX_ANTHROPIC_ROUTE = "googleVertex.anthropic.messages"
+
+
 def normalize_portkey_row(
     row: dict, *, import_context: ImportContext | None = None
 ) -> dict:
@@ -262,9 +266,13 @@ def normalize_portkey_row(
     cost = row.get("cost")
     cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
 
+    provider = row.get("ai_org")
+    if route == _GOOGLE_VERTEX_ANTHROPIC_ROUTE:
+        provider = "vertex-ai"
+
     result = {
         "ts": ts,
-        "provider": row.get("ai_org"),
+        "provider": provider,
         "model": row.get("ai_model"),
         "status": "error" if is_error else "success",
         "input_tokens": row.get("req_units"),
