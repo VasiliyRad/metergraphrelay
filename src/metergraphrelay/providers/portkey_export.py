@@ -195,7 +195,7 @@ class PortkeyExportClient:
         return PortkeyExport(export_id=returned_id, total=None, status=status)
 
     def cancel_export(self, export_id: str) -> None:
-        self._api_request("POST", self._export_path(export_id, "/cancel"), body={})
+        self._api_request("POST", self._export_path(export_id, "/cancel"), body=None)
 
     def download_to(
         self, export_id: str, dest_path: str, *, on_progress: Callable[[], None] | None = None

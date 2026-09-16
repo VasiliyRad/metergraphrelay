@@ -126,6 +126,7 @@ def test_start_export_posts_to_start_path():
     request = mock.call_args.args[0]
     assert request.full_url == f"{BASE}/logs/exports/exp-1/start"
     assert request.method == "POST"
+    assert json.loads(request.data) == {}
 
 
 def test_get_export_reads_status_enum():
@@ -292,6 +293,10 @@ def test_cancel_export_posts_to_cancel_path():
     request = mock.call_args.args[0]
     assert request.full_url == f"{BASE}/logs/exports/exp-1/cancel"
     assert request.method == "POST"
+    assert request.data is None
+    assert request.get_header("Content-type") is None
+    assert request.get_header("X-portkey-api-key") == "pk-secret"
+    assert request.get_header("User-agent") == EXPECTED_UA
 
 
 def test_api_endpoint_unexpected_2xx_status_raises():
