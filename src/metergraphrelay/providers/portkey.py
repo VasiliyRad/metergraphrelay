@@ -48,6 +48,13 @@ def _tool_names(tool_calls: list | None) -> list[str] | None:
     return names or None
 
 
+def _normalized_search_context_size(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in {"low", "medium", "high"} else None
+
+
 def _extract_response(response: dict) -> tuple[str | None, list | None]:
     if response.get("object") == "response" and isinstance(
         response.get("output"), list
@@ -262,6 +269,21 @@ def normalize_portkey_row(
     cost = row.get("cost")
     cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
 
+    search_context_size = None
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        search_context_size = _normalized_search_context_size(
+            usage.get("search_context_size")
+        )
+    if search_context_size is None:
+        request = row.get("request")
+        if isinstance(request, dict):
+            web_search_options = request.get("web_search_options")
+            if isinstance(web_search_options, dict):
+                search_context_size = _normalized_search_context_size(
+                    web_search_options.get("search_context_size")
+                )
+
     result = {
         "ts": ts,
         "provider": row.get("ai_org"),
@@ -286,6 +308,8 @@ def normalize_portkey_row(
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    if search_context_size is not None:
+        result["search_context_size"] = search_context_size
     if import_context is not None:
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope

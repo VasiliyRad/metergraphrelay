@@ -174,6 +174,65 @@ def test_normalize_portkey_row_maps_verified_fields():
 
 
 @pytest.mark.parametrize(
+    ("search_context_size", "expected"),
+    [(" low ", "low"), ("MEDIUM", "medium"), ("high", "high")],
+)
+def test_normalize_portkey_row_maps_search_context_size_from_request(
+    search_context_size, expected
+):
+    row = _chat_completion_row(
+        request={
+            "model": "sonar",
+            "web_search_options": {"search_context_size": search_context_size},
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["search_context_size"] == expected
+
+
+def test_normalize_portkey_row_response_usage_search_context_size_wins():
+    row = _chat_completion_row(
+        request={
+            "model": "sonar",
+            "web_search_options": {"search_context_size": "low"},
+        },
+        response={
+            "object": "chat.completion",
+            "choices": [],
+            "usage": {"search_context_size": " HIGH "},
+        },
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["search_context_size"] == "high"
+
+
+@pytest.mark.parametrize(
+    "row_overrides",
+    [
+        {"request": {}},
+        {"request": {"web_search_options": {}}},
+        {"request": "not a dict"},
+        {
+            "request": {
+                "web_search_options": {"search_context_size": "max"}
+            }
+        },
+        {"request": {"web_search_options": {"search_context_size": 5}}},
+    ],
+)
+def test_normalize_portkey_row_omits_invalid_or_missing_search_context_size(
+    row_overrides,
+):
+    result = normalize_portkey_row(_chat_completion_row(**row_overrides))
+
+    assert "search_context_size" not in result
+
+
+@pytest.mark.parametrize(
     ("created_at", "expected"),
     [
         ("2026-08-10T05:00:00-07:00", "2026-08-10T12:00:00Z"),
@@ -420,6 +479,45 @@ def test_convert_portkey_export_streams_and_counts(tmp_path):
     assert len(lines) == 2
     assert json.loads(lines[0])["request_id"] == "row-1"
     assert json.loads(lines[1])["request_id"] == "row-2"
+
+
+def test_convert_portkey_export_maps_perplexity_search_context_size(tmp_path):
+    input_path = tmp_path / "export.jsonl"
+    row = _chat_completion_row(
+        id="perplexity-sonar-1",
+        trace_id="trace-perplexity-1",
+        ai_org="perplexity-ai",
+        ai_model="sonar",
+        request={
+            "model": "sonar",
+            "messages": [{"role": "user", "content": "search for cats"}],
+            "web_search_options": {"search_context_size": "medium"},
+        },
+        response={
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Cats are mammals.",
+                    },
+                    "index": 0,
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"search_context_size": "medium"},
+        },
+    )
+    input_path.write_text(json.dumps(row) + "\n")
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+
+    assert (converted, skipped) == (1, 0)
+    output_row = json.loads(output_path.read_text())
+    assert output_row["provider"] == "perplexity-ai"
+    assert output_row["model"] == "sonar"
+    assert output_row["search_context_size"] == "medium"
 
 
 def test_convert_portkey_export_skips_malformed_json_line(tmp_path, capsys):
