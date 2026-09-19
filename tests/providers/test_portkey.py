@@ -932,3 +932,161 @@ def test_openai_reasoning_items_are_dropped_without_taking_the_row_with_them():
     assert result["response_text"] == "Here is the latest on X."
     assert [call.get("type") for call in result["tool_calls"]] == ["web_search_call"]
     assert_capture_contract(result)
+
+
+def _usage_row(usage, *, response_extra=None):
+    row = _responses_row()
+    row["response"] = {"object": "response", "usage": usage, **(response_extra or {})}
+    return row
+
+
+def test_openai_responses_cache_and_reasoning_detail_survives():
+    """Cached tokens sit inside the input total here, so losing the count bills
+    them at the input rate instead of the far cheaper cache rate."""
+    row = _usage_row(
+        {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 25},
+            "output_tokens_details": {"reasoning_tokens": 18},
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["cache_read_tokens"] == 60
+    assert result["cache_write_tokens"] == 25
+    assert result["reasoning_tokens"] == 18
+    # Reasoning is already inside the output total and must not be added again.
+    assert result["output_tokens"] == 40
+
+
+def test_chat_completions_and_xai_cache_shape_survives():
+    row = _usage_row(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens": 55},
+            "completion_tokens_details": {"reasoning_tokens": 9},
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["cache_read_tokens"] == 55
+    assert result["reasoning_tokens"] == 9
+
+
+def test_anthropic_cache_ttl_split_is_kept_and_totalled():
+    """A 5-minute and a one-hour cache write are priced differently, so the
+    split has to survive, and the aggregate still has to cover both."""
+    row = _usage_row(
+        {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "cache_read_input_tokens": 70,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 12,
+                "ephemeral_1h_input_tokens": 8,
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["cache_read_tokens"] == 70
+    assert result["cache_write_5m_tokens"] == 12
+    assert result["cache_write_1h_tokens"] == 8
+    assert result["cache_write_tokens"] == 20
+    assert result["service_tier"] == "standard"
+    assert result["inference_geo"] == "global"
+
+
+def test_aggregate_cache_write_wins_over_the_ttl_split():
+    row = _usage_row(
+        {
+            "cache_creation_input_tokens": 30,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 12,
+                "ephemeral_1h_input_tokens": 8,
+            },
+        }
+    )
+
+    assert normalize_portkey_row(row)["cache_write_tokens"] == 30
+
+
+def test_grounding_queries_are_counted_across_choices():
+    """Grounding is billed per query and one prompt runs several, so the count
+    cannot be derived from the call count."""
+    row = _usage_row(
+        {"prompt_tokens": 100, "completion_tokens": 40},
+        response_extra={
+            "choices": [
+                {"groundingMetadata": {"webSearchQueries": ["a", "b", "c"]}},
+                {"groundingMetadata": {"webSearchQueries": ["d"]}},
+            ]
+        },
+    )
+
+    assert normalize_portkey_row(row)["grounding_queries"] == 4
+
+
+def test_server_tool_use_counts_survive():
+    row = _usage_row(
+        {"server_tool_use": {"web_search_requests": 3, "web_fetch_requests": 1}}
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["server_tool_use"] == {
+        "web_search_requests": 3,
+        "web_fetch_requests": 1,
+    }
+
+
+def test_service_tier_on_the_response_body_is_carried():
+    row = _usage_row({"prompt_tokens": 1}, response_extra={"service_tier": "default"})
+
+    assert normalize_portkey_row(row)["service_tier"] == "default"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"object": "response"},
+        {"object": "response", "usage": None},
+        {"object": "response", "usage": "not-a-dict"},
+        {"error": {"message": "upstream failed"}},
+    ],
+)
+def test_a_row_without_usage_detail_emits_no_detail_keys(response):
+    """A detail nobody reported stays absent, so a later capture regression
+    cannot hide behind a plausible 0."""
+    row = _responses_row()
+    row["response"] = response
+
+    result = normalize_portkey_row(row)
+
+    for key in (
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cache_write_5m_tokens",
+        "cache_write_1h_tokens",
+        "reasoning_tokens",
+        "service_tier",
+        "inference_geo",
+        "server_tool_use",
+        "grounding_queries",
+    ):
+        assert key not in result
+
+
+def test_a_zero_cache_read_is_recorded_as_zero_not_dropped():
+    """A reported 0 means caching was off for that call, which is not the same
+    as the provider reporting nothing."""
+    row = _usage_row({"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}})
+
+    assert normalize_portkey_row(row)["cache_read_tokens"] == 0
