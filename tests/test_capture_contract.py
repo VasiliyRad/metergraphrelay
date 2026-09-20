@@ -15,6 +15,7 @@ import pytest
 
 from metergraphrelay.capture_contract import (
     NATIVE_SEARCH_AUDIT_TYPES,
+    capture_response_text,
     capture_text,
     capture_tool_call,
     capture_tool_calls,
@@ -126,3 +127,33 @@ def test_no_surviving_tool_calls_is_none_not_an_empty_list():
     assert capture_tool_calls([{"type": "reasoning", "id": "rs-1"}]) is None
     assert capture_tool_calls([]) is None
     assert capture_tool_calls(None) is None
+
+
+def test_a_recognised_tool_call_with_no_id_is_identified_by_position():
+    # Providers that log whatever an integration handed them sometimes omit the
+    # id. Dropping the call would describe a tool turn as text alone.
+    calls = capture_tool_calls(
+        [
+            {"type": "text", "text": "ignored"},
+            {"type": "tool_use", "name": "search", "input": {}},
+        ]
+    )
+
+    assert calls == [{"call_id": "tool-1", "name": "search", "arguments": "{}"}]
+
+
+def test_a_tool_call_with_no_name_is_dropped_even_with_a_position():
+    assert capture_tool_calls([{"type": "tool_use", "id": "t-1"}]) is None
+
+
+def test_capture_response_text_spells_a_text_less_reply_as_empty():
+    assert capture_response_text(None) == ""
+    assert capture_response_text("hi") == "hi"
+    assert capture_response_text({"a": 1}) == '{"a": 1}'
+
+
+def test_capture_response_text_leaves_an_opted_out_row_without_content():
+    # The pipeline reads None here as the content opt-out, which is the one
+    # place None is correct.
+    assert capture_response_text(None, content_opted_in=False) is None
+    assert capture_response_text("hi", content_opted_in=False) is None

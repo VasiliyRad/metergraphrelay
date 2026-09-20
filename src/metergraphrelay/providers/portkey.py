@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .. import __version__
-from ..capture_contract import capture_text, capture_tool_calls
+from ..capture_contract import capture_row, capture_text, capture_tool_calls
 
 
 # Shared with the other sync providers; re-exported here for existing imports.
@@ -305,7 +305,7 @@ def normalize_portkey_row(
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope
         result["import_event_id"] = import_event_id  # validated, stripped id
-    return result
+    return capture_row(result)
 
 
 def convert_portkey_export(

@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
+from ..capture_contract import capture_response_text, capture_row
 from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
@@ -409,7 +410,7 @@ def normalize_observation(
         "content_opted_in": True,
         "request_json": request_json,
         "request_text": request_text,
-        "response_text": response_text,
+        "response_text": capture_response_text(response_text),
         "trace_id": observation["traceId"],
         "span_id": observation["id"],
         "parent_span_id": observation.get("parentObservationId"),
@@ -423,7 +424,7 @@ def normalize_observation(
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(observation.get("id"))
-    return row
+    return capture_row(row)
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:

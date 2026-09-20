@@ -23,6 +23,8 @@ from metergraphrelay.providers.langfuse import (
     pull_langfuse,
 )
 
+from test_capture_contract import assert_capture_contract
+
 
 def test_build_filter_returns_none_when_no_selectors():
     assert build_filter([], []) is None
@@ -782,13 +784,16 @@ def test_normalize_observation_error_level_sets_error_and_status():
     assert row["error_type"] == "rate limited"
 
 
-def test_normalize_observation_missing_usage_details_yields_none_tokens():
+def test_normalize_observation_missing_usage_details_omits_the_token_counts():
     observation = make_observation(usageDetails={})
 
     row = normalize_observation(observation, route_override=None)
 
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
+    # A count the source never recorded is absent, not None: the pipeline
+    # validates these on presence, so an explicit None reads as a bad number
+    # and drops the row.
+    assert "input_tokens" not in row
+    assert "output_tokens" not in row
 
 
 @pytest.mark.parametrize("missing_field", ["startTime", "id", "traceId"])
@@ -800,13 +805,13 @@ def test_normalize_observation_missing_required_field_raises_key_error(missing_f
         normalize_observation(observation, route_override=None)
 
 
-def test_normalize_observation_non_dict_usage_details_yields_none_tokens():
+def test_normalize_observation_non_dict_usage_details_omits_the_token_counts():
     observation = make_observation(usageDetails="not-a-dict")
 
     row = normalize_observation(observation, route_override=None)
 
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
+    assert "input_tokens" not in row
+    assert "output_tokens" not in row
 
 
 def test_normalize_observation_string_tags_are_ignored_not_character_split():
@@ -1467,3 +1472,10 @@ def test_normalize_observation_rejects_an_unusable_import_event_id(bad_id):
             route_override=None,
             import_context=ImportContext(source="langfuse", source_scope="s"),
         )
+
+
+def test_a_text_less_observation_still_satisfies_the_capture_contract():
+    row = normalize_observation(make_observation(output=None), route_override=None)
+
+    assert row["response_text"] == ""
+    assert_capture_contract(row)
