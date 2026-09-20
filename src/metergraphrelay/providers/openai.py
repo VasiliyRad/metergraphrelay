@@ -24,6 +24,40 @@ def _as_mapping(call: Any) -> Any:
     return getattr(call, "__dict__", {})
 
 
+def _usage_int(usage: Any, group: str, field: str) -> int | None:
+    """One nested usage count, when the provider recorded it.
+
+    Absent and zero are different facts: a provider reporting 0 says the feature
+    was off for that call, where a missing count says nothing at all and must
+    not be read as zero.
+    """
+    detail = getattr(usage, group, None)
+    value = getattr(detail, field, None)
+    if value is None and isinstance(detail, dict):
+        value = detail.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _usage_detail(usage: Any) -> dict[str, int]:
+    """Counts that sit beside the totals and are billed at their own rates.
+
+    `prompt_tokens` already includes the cached tokens, so a row without the
+    cache count bills them at the full input rate rather than the far cheaper
+    cache rate. Reasoning tokens are already inside `completion_tokens` and are
+    carried as detail only, never added to the total.
+    """
+    detail = {}
+    cached = _usage_int(usage, "prompt_tokens_details", "cached_tokens")
+    if cached is not None:
+        detail["cache_read_tokens"] = cached
+    reasoning = _usage_int(usage, "completion_tokens_details", "reasoning_tokens")
+    if reasoning is not None:
+        detail["reasoning_tokens"] = reasoning
+    return detail
+
+
 def normalize_completion(
     completion: Any,
     messages: Iterable[Any],
@@ -66,6 +100,7 @@ def normalize_completion(
         "endpoint": "chat.completions",
         "input_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
         "output_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+        **_usage_detail(usage),
         "error": content_fetch_error is not None,
         "error_type": (
             type(content_fetch_error).__name__ if content_fetch_error else None

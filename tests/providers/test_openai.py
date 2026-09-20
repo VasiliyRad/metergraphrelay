@@ -330,3 +330,75 @@ def test_an_opted_out_row_keeps_no_content_at_all():
 
     assert row["response_text"] is None
     assert row["request_json"] is None
+
+
+def _normalized(usage):
+    return normalize_completion(
+        make_completion(usage=usage),
+        [make_message("user", "hi")],
+        route="r",
+        include_content=False,
+    )
+
+
+def test_cached_prompt_tokens_are_carried():
+    """`prompt_tokens` already includes the cached tokens, so a row without the
+    count bills them at the full input rate instead of the cache rate."""
+    row = _normalized(
+        SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=40,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=60),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=18),
+        )
+    )
+
+    assert row["input_tokens"] == 100
+    assert row["cache_read_tokens"] == 60
+    assert row["reasoning_tokens"] == 18
+    # Reasoning is already inside the output total and must not be added again.
+    assert row["output_tokens"] == 40
+
+
+def test_a_usage_detail_the_provider_did_not_report_stays_absent():
+    """A detail nobody reported must not become a plausible 0, or a later
+    capture regression hides behind it."""
+    row = _normalized(SimpleNamespace(prompt_tokens=12, completion_tokens=34))
+
+    assert "cache_read_tokens" not in row
+    assert "reasoning_tokens" not in row
+
+
+def test_a_reported_zero_is_kept():
+    """Zero cached tokens is a fact about the call, unlike a missing count."""
+    row = _normalized(
+        SimpleNamespace(
+            prompt_tokens=12,
+            completion_tokens=34,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        )
+    )
+
+    assert row["cache_read_tokens"] == 0
+
+
+def test_usage_detail_read_from_a_mapping_as_well_as_an_object():
+    """The client returns model objects, but a replayed or serialised completion
+    arrives as plain dictionaries."""
+    row = _normalized(
+        SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=40,
+            prompt_tokens_details={"cached_tokens": 25},
+        )
+    )
+
+    assert row["cache_read_tokens"] == 25
+
+
+def test_a_completion_without_usage_still_normalizes():
+    row = _normalized(None)
+    assert "cache_read_tokens" not in row
+    # capture_row drops a total the source never recorded, rather than sending
+    # an explicit null that the pipeline reads as a malformed number.
+    assert "input_tokens" not in row and "output_tokens" not in row
