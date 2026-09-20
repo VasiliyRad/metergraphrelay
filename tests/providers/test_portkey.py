@@ -1169,3 +1169,44 @@ def test_a_response_that_ran_no_search_reports_none_rather_than_nothing():
 
     row["response"] = {"choices": [{"message": {"content": "hi"}}]}
     assert "web_search_calls" not in normalize_portkey_row(row)
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [True, False, float("nan"), float("inf"), float("-inf"), "0.02", [], {}, None],
+)
+def test_a_cost_that_is_not_a_number_leaves_the_row_without_one(cost):
+    """A bool is an int in Python, so it reaches the conversion, and
+    `Decimal("True")` raises an error the export converter does not catch. A row
+    stating no usable cost has to convert without one rather than fail."""
+    result = normalize_portkey_row(_responses_row(cost=cost))
+
+    assert result["cost_usd"] is None
+    assert "reported_cost_usd" not in result
+    assert "reported_cost_source" not in result
+    # The row is still a Portkey row; only the amount is missing.
+    assert result["gateway"] == "portkey"
+
+
+def test_a_malformed_cost_does_not_abort_the_export_window(tmp_path):
+    """One unusable value must not take the whole window with it: the converter
+    catches a malformed row, but not every exception a row can raise."""
+    input_path = tmp_path / "export.jsonl"
+    output_path = tmp_path / "rows.jsonl"
+    input_path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                _responses_row(id="row-1", trace_id="t-1", cost=72.72),
+                _responses_row(id="row-2", trace_id="t-2", cost=True),
+                _responses_row(id="row-3", trace_id="t-3", cost=193947.66285),
+            )
+        )
+        + "\n"
+    )
+
+    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+
+    assert (converted, skipped) == (3, 0)
+    costs = [json.loads(line)["cost_usd"] for line in output_path.read_text().splitlines()]
+    assert costs == ["0.7272", None, "1939.4766285"]

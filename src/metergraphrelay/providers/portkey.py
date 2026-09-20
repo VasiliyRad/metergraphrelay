@@ -381,6 +381,23 @@ def _web_search_calls(response: dict) -> int | None:
     )
 
 
+def _cost_usd_from_cents(cents: Any) -> Decimal | None:
+    """A row's cost in dollars, or None when it does not state a usable one.
+
+    Portkey states the cost in cents. Dividing in decimal keeps the value exact:
+    it ends up in a numeric column, and binary rounding introduced here survives
+    the whole way.
+
+    A bool is an int in Python, and ``Decimal("True")`` raises an error the
+    export converter does not catch, so one such row would end the window rather
+    than convert without a cost. A non-finite value is not a cost either.
+    """
+    if isinstance(cents, bool) or not isinstance(cents, (int, float)):
+        return None
+    value = Decimal(str(cents))
+    return value / 100 if value.is_finite() else None
+
+
 def _endpoint(response: dict) -> str | None:
     """Which provider API the call went to, as the billing evidence names it.
 
@@ -451,13 +468,7 @@ def normalize_portkey_row(
         else "portkey/backfill"
     )
 
-    # Portkey states the cost in cents. Dividing in decimal and carrying the
-    # result as a string keeps it exact: the value ends up in a numeric column,
-    # and binary rounding introduced here survives the whole way. `cost_usd` is
-    # the field the server reads for an amount it has no provenance for, so it
-    # has to carry the exact value too, not only the named one.
-    cost = row.get("cost")
-    cost_usd = Decimal(str(cost)) / 100 if isinstance(cost, (int, float)) else None
+    cost_usd = _cost_usd_from_cents(row.get("cost"))
 
     result = {
         "ts": ts,
