@@ -1129,8 +1129,10 @@ def test_a_row_without_a_cost_carries_no_source_to_trust():
 
     result = normalize_portkey_row(row)
 
-    assert result["reported_cost_usd"] is None
-    assert result["reported_cost_source"] is None
+    # Absent, not null: a source named with no amount behind it would read as a
+    # cost of nothing rather than as no cost reported.
+    assert "reported_cost_usd" not in result
+    assert "reported_cost_source" not in result
     # The gateway is still known; only the amount is missing.
     assert result["gateway"] == "portkey"
 

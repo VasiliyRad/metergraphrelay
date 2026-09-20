@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
+from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row
 from ..import_identity import ImportContext, canonical_import_event_id
 
@@ -402,6 +403,7 @@ def normalize_observation(
         "cache_write_tokens": usage["cache_write_tokens"],
         "reasoning_tokens": usage["reasoning_tokens"],
         "cost_usd": observation.get("totalCost"),
+        **reported_cost(observation.get("totalCost"), source="langfuse.observation.totalCost"),
         "error": error,
         "error_type": error_type,
         "request_id": observation["id"],

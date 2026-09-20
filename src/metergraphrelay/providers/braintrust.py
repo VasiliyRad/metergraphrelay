@@ -9,6 +9,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
+from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row, capture_tool_calls
 from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
@@ -513,6 +514,7 @@ def normalize_span(
         "reasoning_tokens": usage["reasoning_tokens"],
         "latency_ms": usage["latency_ms"],
         "cost_usd": _cost_usd(span, metrics),
+        **reported_cost(_cost_usd(span, metrics), source="braintrust.estimated_cost"),
         "error": error,
         "error_type": _error_type(raw_error) if error else None,
         "request_id": span["id"],

@@ -739,6 +739,10 @@ def test_normalize_observation_full_row():
         "cache_write_tokens": None,
         "reasoning_tokens": None,
         "cost_usd": 0.0012,
+        # An estimate Langfuse computed, named so it is never mistaken for
+        # an amount a provider charged.
+        "reported_cost_usd": "0.0012",
+        "reported_cost_source": "langfuse.observation.totalCost",
         "error": False,
         "error_type": None,
         "request_id": "obs-1",
@@ -1479,3 +1483,14 @@ def test_a_text_less_observation_still_satisfies_the_capture_contract():
 
     assert row["response_text"] == ""
     assert_capture_contract(row)
+
+
+def test_an_observation_without_a_cost_names_no_source():
+    """A named source with no amount behind it would read as a cost of nothing."""
+    observation = make_observation()
+    observation.pop("totalCost", None)
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert "reported_cost_usd" not in row
+    assert "reported_cost_source" not in row

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .. import __version__
+from ..billing_evidence import reported_cost
 from ..capture_contract import capture_row, capture_text, capture_tool_calls
 
 
@@ -456,7 +457,7 @@ def normalize_portkey_row(
     # result as a string keeps it exact: the value ends up in a numeric column,
     # and binary rounding introduced here would survive the whole way.
     reported_cost_usd = (
-        str(Decimal(str(cost)) / 100) if isinstance(cost, (int, float)) else None
+        Decimal(str(cost)) / 100 if isinstance(cost, (int, float)) else None
     )
 
     result = {
@@ -473,9 +474,10 @@ def normalize_portkey_row(
         # amount rather than a number of unknown origin. `cost_usd` stays for
         # application versions that only read the legacy field.
         "cost_usd": cost_usd,
-        "reported_cost_usd": reported_cost_usd,
-        "reported_cost_source": "portkey.cost" if reported_cost_usd else None,
+        # Stated whether or not a cost came with the row: it is where the call
+        # was served, not a property of the amount.
         "gateway": "portkey",
+        **reported_cost(reported_cost_usd, source="portkey.cost"),
         "endpoint": _endpoint(response),
         "request_id": request_id,
         "span_id": request_id,
