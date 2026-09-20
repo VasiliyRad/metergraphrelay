@@ -39,6 +39,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from .. import __version__
+from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row
 from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
@@ -473,6 +474,7 @@ def normalize_run(
         "reasoning_tokens": usage["reasoning_tokens"],
         "latency_ms": _latency_ms(run.get("start_time"), run.get("end_time")),
         "cost_usd": _cost_usd(run),
+        **reported_cost(_cost_usd(run), source="langsmith.total_cost"),
         "error": error,
         "error_type": error_type,
         "request_id": run_id,

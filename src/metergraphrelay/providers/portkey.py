@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .. import __version__
+from ..billing_evidence import reported_cost
 from ..capture_contract import capture_row, capture_text, capture_tool_calls
 
 
@@ -380,6 +381,23 @@ def _web_search_calls(response: dict) -> int | None:
     )
 
 
+def _cost_usd_from_cents(cents: Any) -> Decimal | None:
+    """A row's cost in dollars, or None when it does not state a usable one.
+
+    Portkey states the cost in cents. Dividing in decimal keeps the value exact:
+    it ends up in a numeric column, and binary rounding introduced here survives
+    the whole way.
+
+    A bool is an int in Python, and ``Decimal("True")`` raises an error the
+    export converter does not catch, so one such row would end the window rather
+    than convert without a cost. A non-finite value is not a cost either.
+    """
+    if isinstance(cents, bool) or not isinstance(cents, (int, float)):
+        return None
+    value = Decimal(str(cents))
+    return value / 100 if value.is_finite() else None
+
+
 def _endpoint(response: dict) -> str | None:
     """Which provider API the call went to, as the billing evidence names it.
 
@@ -450,14 +468,7 @@ def normalize_portkey_row(
         else "portkey/backfill"
     )
 
-    cost = row.get("cost")
-    cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
-    # Portkey states the cost in cents. Dividing in decimal and carrying the
-    # result as a string keeps it exact: the value ends up in a numeric column,
-    # and binary rounding introduced here would survive the whole way.
-    reported_cost_usd = (
-        str(Decimal(str(cost)) / 100) if isinstance(cost, (int, float)) else None
-    )
+    cost_usd = _cost_usd_from_cents(row.get("cost"))
 
     result = {
         "ts": ts,
@@ -472,10 +483,11 @@ def normalize_portkey_row(
         # Portkey's own figure, named so it can be recognised as a gateway's
         # amount rather than a number of unknown origin. `cost_usd` stays for
         # application versions that only read the legacy field.
-        "cost_usd": cost_usd,
-        "reported_cost_usd": reported_cost_usd,
-        "reported_cost_source": "portkey.cost" if reported_cost_usd else None,
+        "cost_usd": str(cost_usd) if cost_usd is not None else None,
+        # Stated whether or not a cost came with the row: it is where the call
+        # was served, not a property of the amount.
         "gateway": "portkey",
+        **reported_cost(cost_usd, source="portkey.cost"),
         "endpoint": _endpoint(response),
         "request_id": request_id,
         "span_id": request_id,

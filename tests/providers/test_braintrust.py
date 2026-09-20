@@ -892,3 +892,15 @@ def test_a_text_less_reply_still_satisfies_the_capture_contract():
 
     assert row["response_text"] == ""
     assert_capture_contract(row)
+
+
+def test_the_cost_braintrust_estimated_is_named_as_an_estimate():
+    """Braintrust computes this from the tokens it observed against its own
+    price table -- the field is called `estimated_cost`. Naming the source keeps
+    it from being read as an amount a provider charged."""
+    row = normalize_span(make_span(estimated_cost=0.0042), route_override=None)
+
+    assert row["reported_cost_usd"] == "0.0042"
+    assert row["reported_cost_source"] == "braintrust.estimated_cost"
+    # Not a gateway: it never sat in the request path.
+    assert "gateway" not in row

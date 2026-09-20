@@ -318,3 +318,21 @@ def test_a_text_less_run_still_satisfies_the_capture_contract():
 
     assert row["response_text"] == ""
     assert_capture_contract(row)
+
+
+def test_the_cost_langsmith_reported_is_named_as_its_own_figure():
+    """LangSmith totals this from the tokens it observed, so it is an estimate
+    rather than an amount a provider charged. Naming the source is what keeps an
+    audit able to tell the two apart."""
+    row = normalize_run(make_run(total_cost=0.0042), route_override=None)
+
+    assert row["reported_cost_usd"] == "0.0042"
+    assert row["reported_cost_source"] == "langsmith.total_cost"
+    assert "gateway" not in row
+
+
+def test_a_run_without_a_cost_names_no_source():
+    row = normalize_run(make_run(), route_override=None)
+
+    if row.get("cost_usd") is None:
+        assert "reported_cost_source" not in row
