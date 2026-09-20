@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 from metergraphrelay import __version__
 from metergraphrelay.providers.openai import normalize_completion, pull_openai
 
+from test_capture_contract import assert_capture_contract
+
 
 def make_completion(**overrides):
     defaults = dict(
@@ -47,6 +49,7 @@ def test_normalize_completion_with_content_included():
         "content_opted_in": True,
         "request_json": json.dumps([{"role": "user", "content": "hi"}]),
         "response_text": "hello",
+        "tool_calls": None,
         "sdk": "metergraphrelay",
         "sdk_version": __version__,
     }
@@ -102,11 +105,14 @@ def test_normalize_completion_handles_missing_usage_and_metadata():
         completion, [], route="openai/backfill", include_content=True
     )
 
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
+    assert "input_tokens" not in row
+    assert "output_tokens" not in row
     assert row["tags"] == {}
     assert row["request_json"] == json.dumps([])
-    assert row["response_text"] is None
+    # Content was captured, so a reply with no text is "". None is reserved for
+    # a row carrying no content at all, and on a captured row it marks the
+    # result malformed and drops the row from analysis.
+    assert row["response_text"] == ""
 
 
 def test_normalize_completion_keeps_success_and_tokens_on_content_fetch_error():
@@ -296,3 +302,31 @@ def test_pull_openai_echoes_to_stdout_when_enabled(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "chatcmpl-1" in captured.out
+
+
+def test_a_tool_only_reply_keeps_its_call_and_satisfies_the_contract():
+    """A tool-only reply has content None. Recording that as response_text None
+    dropped the row; recording "" without the call would describe the turn as an
+    empty response rather than the tool use it was."""
+    message = make_message("assistant", None)
+    message.tool_calls = [
+        {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+    ]
+    completion = make_completion(choices=[SimpleNamespace(message=message)])
+
+    row = normalize_completion(
+        completion, [make_message("user", "hi")], route="r", include_content=True
+    )
+
+    assert row["response_text"] == ""
+    assert row["tool_calls"] == [{"call_id": "c1", "name": "lookup", "arguments": "{}"}]
+    assert_capture_contract(row)
+
+
+def test_an_opted_out_row_keeps_no_content_at_all():
+    row = normalize_completion(
+        make_completion(), [make_message("user", "hi")], route="r", include_content=False
+    )
+
+    assert row["response_text"] is None
+    assert row["request_json"] is None

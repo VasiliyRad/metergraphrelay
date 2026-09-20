@@ -14,6 +14,9 @@ Two rules bind an importer:
   which the pipeline reads as native-search audit and passes over.
 * ``response_text`` is a string. A response carrying no text is ``""``; ``None``
   means the result itself is malformed.
+* A numeric the source never recorded is absent, not ``None``. The pipeline
+  validates ``latency_ms``, ``input_tokens`` and ``output_tokens`` whenever the
+  key is present, so an explicit ``None`` reads as a malformed number.
 
 Provider wire items that are neither a tool call nor search audit -- OpenAI
 ``reasoning`` items are the case seen in production -- have no representation in
@@ -30,6 +33,11 @@ from typing import Any
 # exempt from the tool-call shape. Passed through with their fields intact.
 NATIVE_SEARCH_AUDIT_TYPES = frozenset({"web_search_call", "web_fetch_call"})
 
+# Validated by the pipeline on presence, not on value: carrying one of these as
+# an explicit None says "this is the number" and fails, where leaving it out
+# says "the source did not record one" and is accepted.
+PRESENCE_CHECKED_NUMERIC_FIELDS = ("latency_ms", "input_tokens", "output_tokens")
+
 
 def capture_text(parts: list[str]) -> str:
     """Join a response's text parts into the contract's ``response_text``.
@@ -38,6 +46,21 @@ def capture_text(parts: list[str]) -> str:
     response, and ``None`` would mark the whole result malformed.
     """
     return "\n".join(parts)
+
+
+def capture_response_text(value: Any, *, content_opted_in: bool = True) -> str | None:
+    """A row's ``response_text``, as the contract requires it.
+
+    ``None`` is reserved for a row carrying no content at all, which the
+    pipeline recognises as the opt-out. On a row whose content *was* captured it
+    means something else entirely -- a malformed result -- and takes the row out
+    of every analysis. A reply with nothing to say is ``""``.
+    """
+    if not content_opted_in:
+        return None
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else json.dumps(value)
 
 
 def _arguments(value: Any) -> str:
@@ -49,11 +72,18 @@ def _arguments(value: Any) -> str:
     return json.dumps(value)
 
 
-def capture_tool_call(item: Any) -> dict | None:
+def capture_tool_call(item: Any, *, position: int | None = None) -> dict | None:
     """Convert one provider tool item to the contract shape.
 
     Returns the item unchanged when it is native-search audit, and ``None`` for
     anything with no contract representation, which the caller drops.
+
+    ``position`` supplies a fallback identity for a recognised tool call whose
+    source recorded no id. Providers that log whatever an integration handed
+    them do occasionally omit it, and dropping the call would describe a tool
+    turn as though the model had replied with text alone. The contract needs the
+    id only to tell one call from another within a response, which the position
+    does. A call with no name is still dropped: there is nothing to identify.
     """
     if not isinstance(item, dict):
         return None
@@ -82,10 +112,12 @@ def capture_tool_call(item: Any) -> dict | None:
     else:
         return None
 
-    if not isinstance(call_id, str) or not call_id.strip():
-        return None
     if not isinstance(name, str) or not name.strip():
         return None
+    if not isinstance(call_id, str) or not call_id.strip():
+        if position is None:
+            return None
+        call_id = f"tool-{position}"
     return {"call_id": call_id, "name": name, "arguments": _arguments(arguments)}
 
 
@@ -94,6 +126,20 @@ def capture_tool_calls(items: Any) -> list | None:
     if not isinstance(items, (list, tuple)):
         return None
     converted = [
-        call for item in items if (call := capture_tool_call(item)) is not None
+        call
+        for position, item in enumerate(items)
+        if (call := capture_tool_call(item, position=position)) is not None
     ]
     return converted or None
+
+
+def capture_row(row: dict) -> dict:
+    """Drop the numerics a source never recorded, so the row stays readable.
+
+    Every other field is passed through untouched.
+    """
+    return {
+        key: value
+        for key, value in row.items()
+        if value is not None or key not in PRESENCE_CHECKED_NUMERIC_FIELDS
+    }

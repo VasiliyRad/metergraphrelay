@@ -23,6 +23,8 @@ from metergraphrelay.providers.langsmith import (
     resolve_project_ids,
 )
 
+from test_capture_contract import assert_capture_contract
+
 PROJECT_ID = "5f6c1a2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b"
 
 
@@ -309,3 +311,10 @@ def test_pull_langsmith_caps_page_limit_and_rejects_repeated_cursor(tmp_path):
 def test_pull_langsmith_requires_a_project(tmp_path):
     with pytest.raises(LangSmithAPIError, match="at least one project"):
         _pull(tmp_path, projects=[])
+
+
+def test_a_text_less_run_still_satisfies_the_capture_contract():
+    row = normalize_run(make_run(outputs=None), route_override=None)
+
+    assert row["response_text"] == ""
+    assert_capture_contract(row)
