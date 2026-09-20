@@ -237,6 +237,147 @@ def _timestamp_from_epoch(numeric: float, raw: Any) -> datetime:
         ) from exc
 
 
+# Portkey passes the upstream provider's usage block through untouched, so one
+# export carries every vendor's spelling of the same counts. Each is resolved by
+# path and the first present one wins. Reasoning tokens are already inside
+# res_units, so they are detail only and never added to output_tokens.
+_CACHE_READ_PATHS = (
+    ("input_tokens_details", "cached_tokens"),
+    ("prompt_tokens_details", "cached_tokens"),
+    ("cache_read_input_tokens",),
+)
+_CACHE_WRITE_PATHS = (
+    ("cache_creation_input_tokens",),
+    ("input_tokens_details", "cache_write_tokens"),
+)
+# Some responses carry the TTL split in place of the aggregate, so summing the
+# split is the only way to see the total.
+_CACHE_WRITE_5M_PATH = ("cache_creation", "ephemeral_5m_input_tokens")
+_CACHE_WRITE_1H_PATH = ("cache_creation", "ephemeral_1h_input_tokens")
+_CACHE_WRITE_TTL_PATHS = (_CACHE_WRITE_5M_PATH, _CACHE_WRITE_1H_PATH)
+_REASONING_PATHS = (
+    ("output_tokens_details", "reasoning_tokens"),
+    ("completion_tokens_details", "reasoning_tokens"),
+)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _dig(source: Any, path: tuple[str, ...]) -> Any:
+    """Follow a key path through nested dicts, returning None off the path.
+
+    The usage block is provider-supplied and reaches us through an error path as
+    readily as a success one, so any level may be missing or not a dict.
+    """
+    current = source
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _first_int(source: Any, paths: tuple[tuple[str, ...], ...]) -> int | None:
+    for path in paths:
+        value = _dig(source, path)
+        if _is_int(value):
+            return value
+    return None
+
+
+def _first_present(source: Any, paths: tuple[tuple[str, ...], ...]) -> Any:
+    for path in paths:
+        value = _dig(source, path)
+        if value is not None:
+            return value
+    return None
+
+
+def _sum_ints(source: Any, paths: tuple[tuple[str, ...], ...]) -> int | None:
+    values = [value for path in paths if _is_int(value := _dig(source, path))]
+    return sum(values) if values else None
+
+
+def _usage_detail(response: dict) -> dict[str, Any]:
+    """Usage detail from a Portkey row's response, present keys only.
+
+    Absent and zero price differently, so a detail nobody reported stays absent
+    rather than becoming a plausible-looking 0 that hides a capture regression.
+    """
+    usage = response.get("usage")
+    detail: dict[str, Any] = {}
+
+    cache_read = _first_int(usage, _CACHE_READ_PATHS)
+    if cache_read is not None:
+        detail["cache_read_tokens"] = cache_read
+
+    write_5m = _dig(usage, _CACHE_WRITE_5M_PATH)
+    if _is_int(write_5m):
+        detail["cache_write_5m_tokens"] = write_5m
+    write_1h = _dig(usage, _CACHE_WRITE_1H_PATH)
+    if _is_int(write_1h):
+        detail["cache_write_1h_tokens"] = write_1h
+
+    cache_write = _first_int(usage, _CACHE_WRITE_PATHS)
+    if cache_write is None:
+        # Only the TTL split was reported: sum it so a consumer that reads just
+        # cache_write_tokens still sees every written token.
+        cache_write = _sum_ints(usage, _CACHE_WRITE_TTL_PATHS)
+    if cache_write is not None:
+        detail["cache_write_tokens"] = cache_write
+
+    reasoning = _first_int(usage, _REASONING_PATHS)
+    if reasoning is not None:
+        detail["reasoning_tokens"] = reasoning
+
+    # Premium tier and region are request metadata, not counts, and they are
+    # what makes priority/batch and regional pricing answerable at all. The
+    # ingest writer keeps unrecognised keys in calls.meta, so they survive
+    # without a schema change.
+    service_tier = _first_present(
+        {"response": response, "usage": usage},
+        (("response", "service_tier"), ("usage", "service_tier")),
+    )
+    if service_tier is not None:
+        detail["service_tier"] = service_tier
+
+    inference_geo = _dig(usage, ("inference_geo",))
+    if inference_geo is not None:
+        detail["inference_geo"] = inference_geo
+
+    server_tool_use = _dig(usage, ("server_tool_use",))
+    if isinstance(server_tool_use, dict) and server_tool_use:
+        detail["server_tool_use"] = server_tool_use
+
+    grounding_queries = _grounding_queries(response)
+    if grounding_queries is not None:
+        detail["grounding_queries"] = grounding_queries
+
+    return detail
+
+
+def _grounding_queries(response: dict) -> int | None:
+    """How many grounding queries a Gemini response ran.
+
+    Google bills grounding per query, not per prompt, and one prompt runs
+    several, so the count cannot be derived from the call count. It sits outside
+    `usage`, under each choice's groundingMetadata.
+    """
+    choices = response.get("choices")
+    if not isinstance(choices, list):
+        return None
+    total = 0
+    seen = False
+    for choice in choices:
+        queries = _dig(choice, ("groundingMetadata", "webSearchQueries"))
+        if isinstance(queries, list):
+            seen = True
+            total += len(queries)
+    return total if seen else None
+
+
 def normalize_portkey_row(
     row: dict, *, import_context: ImportContext | None = None
 ) -> dict:
@@ -301,6 +442,7 @@ def normalize_portkey_row(
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    result.update(_usage_detail(response))
     if import_context is not None:
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope
