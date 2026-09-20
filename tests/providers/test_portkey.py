@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 import os
 from unittest.mock import patch
 
@@ -164,7 +165,9 @@ def test_normalize_portkey_row_maps_verified_fields():
     assert result["status"] == "success"
     assert result["error"] is False
     assert result["error_type"] is None
-    assert result["cost_usd"] == 0.125
+    # A string, so the cents division cannot round: this is the field the
+    # server reads when it has no provenance for the amount.
+    assert result["cost_usd"] == "0.125"
     assert result["request_id"] == "pk-req-1"
     assert result["span_id"] == "pk-req-1"
     assert result["trace_id"] == "trace-1"
@@ -1108,13 +1111,17 @@ def test_the_gateway_figure_is_named_so_it_can_be_recognised():
 def test_the_gateway_figure_keeps_every_digit_portkey_stated():
     """Cents divided in binary floating point lands in a numeric column carrying
     rounding that no later step can remove."""
-    row = _responses_row(cost=1939.4766285)
+    row = _responses_row(cost=193947.66285)
 
     result = normalize_portkey_row(row)
 
-    assert result["reported_cost_usd"] == "19.394766285"
-    # The legacy field is unchanged, so an older application still reads it.
-    assert result["cost_usd"] == 1939.4766285 / 100
+    # Both fields, because the server reads the named one only from a source it
+    # has provenance for and falls back to `cost_usd` otherwise.
+    assert result["reported_cost_usd"] == "1939.4766285"
+    assert result["cost_usd"] == "1939.4766285"
+    # Dividing the same cents in binary floating point loses the last digits,
+    # and the server stores whatever it is handed.
+    assert str(Decimal(str(193947.66285 / 100))) == "1939.4766284999998"
 
 
 def test_a_chat_completions_row_is_named_by_its_own_endpoint():

@@ -451,14 +451,13 @@ def normalize_portkey_row(
         else "portkey/backfill"
     )
 
-    cost = row.get("cost")
-    cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
     # Portkey states the cost in cents. Dividing in decimal and carrying the
     # result as a string keeps it exact: the value ends up in a numeric column,
-    # and binary rounding introduced here would survive the whole way.
-    reported_cost_usd = (
-        Decimal(str(cost)) / 100 if isinstance(cost, (int, float)) else None
-    )
+    # and binary rounding introduced here survives the whole way. `cost_usd` is
+    # the field the server reads for an amount it has no provenance for, so it
+    # has to carry the exact value too, not only the named one.
+    cost = row.get("cost")
+    cost_usd = Decimal(str(cost)) / 100 if isinstance(cost, (int, float)) else None
 
     result = {
         "ts": ts,
@@ -473,11 +472,11 @@ def normalize_portkey_row(
         # Portkey's own figure, named so it can be recognised as a gateway's
         # amount rather than a number of unknown origin. `cost_usd` stays for
         # application versions that only read the legacy field.
-        "cost_usd": cost_usd,
+        "cost_usd": str(cost_usd) if cost_usd is not None else None,
         # Stated whether or not a cost came with the row: it is where the call
         # was served, not a property of the amount.
         "gateway": "portkey",
-        **reported_cost(reported_cost_usd, source="portkey.cost"),
+        **reported_cost(cost_usd, source="portkey.cost"),
         "endpoint": _endpoint(response),
         "request_id": request_id,
         "span_id": request_id,
