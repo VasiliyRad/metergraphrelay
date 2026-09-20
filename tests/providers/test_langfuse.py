@@ -16,6 +16,7 @@ from metergraphrelay.providers.langfuse import (
     _map_content,
     _response_text,
     build_base_params,
+    map_usage_details,
     build_filter,
     fetch_observations_page,
     infer_provider,
@@ -1494,3 +1495,78 @@ def test_an_observation_without_a_cost_names_no_source():
 
     assert "reported_cost_usd" not in row
     assert "reported_cost_source" not in row
+
+
+def test_anthropic_input_keeps_the_cache_buckets_out_of_the_total():
+    """Anthropic reports input excluding the cached tokens and lists them
+    separately. Folding them in makes those tokens part of the total as well as a
+    bucket of their own, and pricing then charges them at the input rate and the
+    cache rate both -- rates an order of magnitude apart."""
+    usage = map_usage_details(
+        {
+            "input_tokens": 7_553_314,
+            "output_tokens": 1_408_203,
+            "cache_read_input_tokens": 4_506_888,
+            "cache_creation_input_tokens": 1_467_079,
+        },
+        provider="anthropic",
+    )
+
+    assert usage["input_tokens"] == 7_553_314
+    assert usage["cache_read_tokens"] == 4_506_888
+    assert usage["cache_write_tokens"] == 1_467_079
+
+
+def test_openai_input_still_gets_its_subtracted_buckets_back():
+    """Langfuse subtracts the details from the parent for the OpenAI wrapper,
+    while OpenAI's own total includes them, so here the buckets do have to be
+    added back."""
+    usage = map_usage_details(
+        {"input": 100, "output": 40, "input_cached_tokens": 60},
+        provider="openai",
+    )
+
+    assert usage["input_tokens"] == 160
+    assert usage["cache_read_tokens"] == 60
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "bedrock", "aws-bedrock", "AWS"])
+def test_every_cache_exclusive_provider_is_matched_case_insensitively(provider):
+    usage = map_usage_details(
+        {"input_tokens": 100, "cache_read_input_tokens": 60}, provider=provider
+    )
+
+    assert usage["input_tokens"] == 100
+
+
+def test_a_provider_that_is_not_named_keeps_the_previous_behaviour():
+    """A row whose provider cannot be inferred is mapped as before rather than
+    guessing a shape for it."""
+    usage = map_usage_details({"input": 100, "input_cached_tokens": 60})
+
+    assert usage["input_tokens"] == 160
+
+
+def test_an_anthropic_observation_prices_what_anthropic_billed():
+    """The production case. With the buckets folded in, this row was billed
+    $68.56 against the $50.64 Anthropic charged."""
+    from decimal import Decimal as D
+
+    usage = map_usage_details(
+        {
+            "input_tokens": 7_553_314,
+            "output_tokens": 1_408_203,
+            "cache_read_input_tokens": 4_506_888,
+            "cache_creation_input_tokens": 1_467_079,
+        },
+        provider="anthropic",
+    )
+    # Sonnet 4.6: input 3.00, output 15.00, cache read 0.30, cache write 3.75.
+    cost = (
+        D(usage["input_tokens"]) * D("3.00")
+        + D(usage["output_tokens"]) * D("15.00")
+        + D(usage["cache_read_tokens"]) * D("0.30")
+        + D(usage["cache_write_tokens"]) * D("3.75")
+    ) / D(1_000_000)
+
+    assert round(cost, 2) == D("50.64")
