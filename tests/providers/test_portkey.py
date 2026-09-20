@@ -13,6 +13,8 @@ from metergraphrelay.providers.portkey import (
     normalize_portkey_row,
 )
 
+from test_capture_contract import assert_capture_contract
+
 
 def _responses_row(**overrides):
     row = {
@@ -306,12 +308,14 @@ def test_normalize_portkey_row_vertex_function_style_google_search():
 
     result = normalize_portkey_row(row)
 
-    assert result["response_text"] is None
+    # A tool-only reply has no text, which the capture contract spells "" --
+    # None would mark the whole result malformed and drop the row.
+    assert result["response_text"] == ""
     assert result["tool_calls"] == [
         {
-            "id": "call-1",
-            "type": "function",
-            "function": {"name": "google_search", "arguments": '{"query": "cats"}'},
+            "call_id": "call-1",
+            "name": "google_search",
+            "arguments": '{"query": "cats"}',
         }
     ]
     assert result["tool_names"] == ["google_search"]
@@ -325,10 +329,9 @@ def test_normalize_portkey_row_anthropic_native_tools():
     assert result["response_text"] == "Let me check that for you."
     assert result["tool_calls"] == [
         {
-            "type": "tool_use",
-            "id": "toolu-1",
+            "call_id": "toolu-1",
             "name": "get_weather",
-            "input": {"location": "SF"},
+            "arguments": '{"location": "SF"}',
         }
     ]
     assert result["tool_names"] == ["get_weather"]
@@ -890,3 +893,42 @@ def test_convert_portkey_export_propagates_on_progress_exception(tmp_path):
 
     with pytest.raises(_StopConvert):
         convert_portkey_export(str(input_path), str(output_path), on_progress=_boom)
+
+
+def test_every_normalized_row_satisfies_the_capture_contract():
+    """A row the pipeline marks unusable is dropped from analysis while still
+    counting as captured traffic, so the contract is checked on every shape
+    Portkey logs, not only on the ones with an assertion of their own."""
+    for build in (_responses_row, _chat_completion_row, _anthropic_row):
+        assert_capture_contract(normalize_portkey_row(build()))
+
+
+def test_anthropic_tool_only_reply_keeps_its_answer_and_stays_readable():
+    """A forced-tool call carries its whole answer in the tool call and no text.
+    This is the shape that silently removed a customer's Anthropic traffic from
+    every analysis."""
+    row = _anthropic_row()
+    row["response"]["content"] = [
+        {"type": "tool_use", "id": "toolu-9", "name": "emit_audit", "input": {"score": 7}}
+    ]
+
+    result = normalize_portkey_row(row)
+
+    assert result["response_text"] == ""
+    assert result["tool_calls"] == [
+        {"call_id": "toolu-9", "name": "emit_audit", "arguments": '{"score": 7}'}
+    ]
+    assert_capture_contract(result)
+
+
+def test_openai_reasoning_items_are_dropped_without_taking_the_row_with_them():
+    row = _responses_row()
+    row["response"]["output"].insert(
+        0, {"type": "reasoning", "id": "rs-1", "summary": [], "encrypted_content": "x"}
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["response_text"] == "Here is the latest on X."
+    assert [call.get("type") for call in result["tool_calls"]] == ["web_search_call"]
+    assert_capture_contract(result)
