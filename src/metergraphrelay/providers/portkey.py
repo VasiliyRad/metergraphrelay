@@ -5,6 +5,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -355,7 +356,41 @@ def _usage_detail(response: dict) -> dict[str, Any]:
     if grounding_queries is not None:
         detail["grounding_queries"] = grounding_queries
 
+    searches = _web_search_calls(response)
+    if searches is not None:
+        detail["web_search_calls"] = searches
+
     return detail
+
+
+def _web_search_calls(response: dict) -> int | None:
+    """How many searches the model ran, for providers that bill per search.
+
+    The count is in the output the model produced, not in `usage`, and a single
+    call runs several. It is a whole charge of its own: on this traffic it is
+    priced per search at a rate the token rates cannot express.
+    """
+    output = response.get("output")
+    if not isinstance(output, list):
+        return None
+    return sum(
+        1
+        for item in output
+        if isinstance(item, dict) and item.get("type") == "web_search_call"
+    )
+
+
+def _endpoint(response: dict) -> str | None:
+    """Which provider API the call went to, as the billing evidence names it.
+
+    A gateway's reported cost is only interpretable alongside the endpoint that
+    produced it, because the same gateway prices its endpoints differently.
+    """
+    if response.get("object") == "response":
+        return "responses"
+    if isinstance(response.get("choices"), list):
+        return "chat.completions"
+    return None
 
 
 def _grounding_queries(response: dict) -> int | None:
@@ -417,6 +452,12 @@ def normalize_portkey_row(
 
     cost = row.get("cost")
     cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
+    # Portkey states the cost in cents. Dividing in decimal and carrying the
+    # result as a string keeps it exact: the value ends up in a numeric column,
+    # and binary rounding introduced here would survive the whole way.
+    reported_cost_usd = (
+        str(Decimal(str(cost)) / 100) if isinstance(cost, (int, float)) else None
+    )
 
     result = {
         "ts": ts,
@@ -428,7 +469,14 @@ def normalize_portkey_row(
         "latency_ms": row.get("response_time"),
         "error": is_error,
         "error_type": error_type,
+        # Portkey's own figure, named so it can be recognised as a gateway's
+        # amount rather than a number of unknown origin. `cost_usd` stays for
+        # application versions that only read the legacy field.
         "cost_usd": cost_usd,
+        "reported_cost_usd": reported_cost_usd,
+        "reported_cost_source": "portkey.cost" if reported_cost_usd else None,
+        "gateway": "portkey",
+        "endpoint": _endpoint(response),
         "request_id": request_id,
         "span_id": request_id,
         "trace_id": trace_id,

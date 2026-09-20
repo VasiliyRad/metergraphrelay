@@ -1090,3 +1090,73 @@ def test_a_zero_cache_read_is_recorded_as_zero_not_dropped():
     row = _usage_row({"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}})
 
     assert normalize_portkey_row(row)["cache_read_tokens"] == 0
+
+
+def test_the_gateway_figure_is_named_so_it_can_be_recognised():
+    """A reported cost is only usable as evidence if its origin is identifiable.
+    Without the gateway and source, it is a number of unknown provenance that
+    billing has no grounds to prefer over a verified rate."""
+    row = _responses_row(cost=72.72)
+
+    result = normalize_portkey_row(row)
+
+    assert result["gateway"] == "portkey"
+    assert result["reported_cost_source"] == "portkey.cost"
+    assert result["endpoint"] == "responses"
+
+
+def test_the_gateway_figure_keeps_every_digit_portkey_stated():
+    """Cents divided in binary floating point lands in a numeric column carrying
+    rounding that no later step can remove."""
+    row = _responses_row(cost=1939.4766285)
+
+    result = normalize_portkey_row(row)
+
+    assert result["reported_cost_usd"] == "19.394766285"
+    # The legacy field is unchanged, so an older application still reads it.
+    assert result["cost_usd"] == 1939.4766285 / 100
+
+
+def test_a_chat_completions_row_is_named_by_its_own_endpoint():
+    row = _responses_row()
+    row["response"] = {"choices": [{"message": {"content": "hi"}}]}
+
+    assert normalize_portkey_row(row)["endpoint"] == "chat.completions"
+
+
+def test_a_row_without_a_cost_carries_no_source_to_trust():
+    row = _responses_row(cost=None)
+
+    result = normalize_portkey_row(row)
+
+    assert result["reported_cost_usd"] is None
+    assert result["reported_cost_source"] is None
+    # The gateway is still known; only the amount is missing.
+    assert result["gateway"] == "portkey"
+
+
+def test_web_search_calls_are_counted_from_the_output():
+    """Searches are billed per search at a rate token rates cannot express, and
+    the count is in the output rather than in usage."""
+    row = _responses_row()
+    row["response"] = {
+        "object": "response",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "output": [
+            {"type": "web_search_call", "id": "ws-1"},
+            {"type": "web_search_call", "id": "ws-2"},
+            {"type": "message", "content": [{"text": "hi"}]},
+        ],
+    }
+
+    assert normalize_portkey_row(row)["web_search_calls"] == 2
+
+
+def test_a_response_that_ran_no_search_reports_none_rather_than_nothing():
+    """Zero searches is a fact about the call; a missing output array is not."""
+    row = _responses_row()
+    row["response"] = {"object": "response", "usage": {}, "output": []}
+    assert normalize_portkey_row(row)["web_search_calls"] == 0
+
+    row["response"] = {"choices": [{"message": {"content": "hi"}}]}
+    assert "web_search_calls" not in normalize_portkey_row(row)
