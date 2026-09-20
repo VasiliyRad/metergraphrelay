@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .. import __version__
+from ..capture_contract import capture_text, capture_tool_calls
 
 
 # Shared with the other sync providers; re-exported here for existing imports.
@@ -49,11 +50,17 @@ def _tool_names(tool_calls: list | None) -> list[str] | None:
 
 
 def _extract_response(response: dict) -> tuple[str | None, list | None]:
+    """Map a Portkey-logged provider response onto (response_text, tool_calls).
+
+    Every branch emits the capture contract (see ``..capture_contract``), never
+    the provider's wire shape: a row the pipeline cannot read is dropped from
+    analysis while still counting as captured traffic.
+    """
     if response.get("object") == "response" and isinstance(
         response.get("output"), list
     ):
         text_parts: list[str] = []
-        tool_calls: list[Any] = []
+        raw_items: list[Any] = []
         for item in response["output"]:
             if not isinstance(item, dict):
                 continue
@@ -62,19 +69,27 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
                     if isinstance(block, dict) and isinstance(block.get("text"), str):
                         text_parts.append(block["text"])
             else:
-                tool_calls.append(item)
-        return ("\n".join(text_parts) or None), (tool_calls or None)
+                raw_items.append(item)
+        return capture_text(text_parts), capture_tool_calls(raw_items)
 
     choices = response.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         message = choices[0].get("message")
         message = message if isinstance(message, dict) else {}
-        response_text = message.get("content")
-        tool_calls = message.get("tool_calls")
-        return (
-            response_text if isinstance(response_text, str) else None,
-            tool_calls if isinstance(tool_calls, list) and tool_calls else None,
-        )
+        content = message.get("content")
+        if isinstance(content, str):
+            text_parts = [content]
+        elif isinstance(content, list):
+            # Multimodal replies carry text in blocks; a tool-only reply carries
+            # no text at all, which the contract spells "".
+            text_parts = [
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ]
+        else:
+            text_parts = []
+        return capture_text(text_parts), capture_tool_calls(message.get("tool_calls"))
 
     content = response.get("content")
     if (
@@ -84,15 +99,15 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
         and content
     ):
         text_parts = []
-        tool_calls = []
+        raw_items = []
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 text_parts.append(block["text"])
-            elif block.get("type") == "tool_use":
-                tool_calls.append(block)
-        return ("\n".join(text_parts) or None), (tool_calls or None)
+            else:
+                raw_items.append(block)
+        return capture_text(text_parts), capture_tool_calls(raw_items)
 
     return json.dumps(response), None
 
