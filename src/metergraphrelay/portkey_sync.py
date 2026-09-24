@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import json
+import sys
 import tempfile
 import time
 from typing import Callable
@@ -190,9 +191,9 @@ def run_portkey_sync(
 def _plan_exports(pk_client, lease, created_export_ids: list[str], renewer) -> list[str]:
     """Create the hourly draft; its ``total`` decides whether to split. No start/poll here.
 
-    ``total > threshold`` cancels the still-unstarted hourly draft and creates
-    exactly 10 overlapping sub-window drafts. If any sub-window draft is itself
-    still oversized, reject with a clear error — the MVP never splits recursively.
+    ``total > threshold`` best-effort cancels the still-unstarted hourly draft and
+    creates exactly 10 overlapping sub-window drafts. If any sub-window draft is
+    itself still oversized, reject with a clear error — the MVP never splits recursively.
     Each create/cancel can be slow, so the lease is renewed on a time cadence
     between them.
     """
@@ -204,8 +205,16 @@ def _plan_exports(pk_client, lease, created_export_ids: list[str], renewer) -> l
     if hourly.total is None or hourly.total <= VOLUME_SPLIT_THRESHOLD:
         return [hourly.export_id]
 
-    # Oversized: cancel the still-unstarted hourly draft, then split into exactly 10.
-    pk_client.cancel_export(hourly.export_id)
+    # Oversized: best-effort cancel the still-unstarted hourly draft, then split into
+    # exactly 10. An unstarted draft costs nothing, so a cancel refusal is non-fatal.
+    try:
+        pk_client.cancel_export(hourly.export_id)
+    except (PortkeyExportError, OSError) as exc:
+        print(
+            f"Warning: could not cancel export {hourly.export_id}: {exc}; the draft "
+            "was never started so it is left in place.",
+            file=sys.stderr,
+        )
     created_export_ids.remove(hourly.export_id)
     renewer.tick()
     # split_window validates the server-provided bounds (aware, end-after-start). A

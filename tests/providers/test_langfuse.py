@@ -16,12 +16,15 @@ from metergraphrelay.providers.langfuse import (
     _map_content,
     _response_text,
     build_base_params,
+    map_usage_details,
     build_filter,
     fetch_observations_page,
     infer_provider,
     normalize_observation,
     pull_langfuse,
 )
+
+from test_capture_contract import assert_capture_contract
 
 
 def test_build_filter_returns_none_when_no_selectors():
@@ -737,6 +740,10 @@ def test_normalize_observation_full_row():
         "cache_write_tokens": None,
         "reasoning_tokens": None,
         "cost_usd": 0.0012,
+        # An estimate Langfuse computed, named so it is never mistaken for
+        # an amount a provider charged.
+        "reported_cost_usd": "0.0012",
+        "reported_cost_source": "langfuse.observation.totalCost",
         "error": False,
         "error_type": None,
         "request_id": "obs-1",
@@ -782,13 +789,16 @@ def test_normalize_observation_error_level_sets_error_and_status():
     assert row["error_type"] == "rate limited"
 
 
-def test_normalize_observation_missing_usage_details_yields_none_tokens():
+def test_normalize_observation_missing_usage_details_omits_the_token_counts():
     observation = make_observation(usageDetails={})
 
     row = normalize_observation(observation, route_override=None)
 
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
+    # A count the source never recorded is absent, not None: the pipeline
+    # validates these on presence, so an explicit None reads as a bad number
+    # and drops the row.
+    assert "input_tokens" not in row
+    assert "output_tokens" not in row
 
 
 @pytest.mark.parametrize("missing_field", ["startTime", "id", "traceId"])
@@ -800,13 +810,13 @@ def test_normalize_observation_missing_required_field_raises_key_error(missing_f
         normalize_observation(observation, route_override=None)
 
 
-def test_normalize_observation_non_dict_usage_details_yields_none_tokens():
+def test_normalize_observation_non_dict_usage_details_omits_the_token_counts():
     observation = make_observation(usageDetails="not-a-dict")
 
     row = normalize_observation(observation, route_override=None)
 
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
+    assert "input_tokens" not in row
+    assert "output_tokens" not in row
 
 
 def test_normalize_observation_string_tags_are_ignored_not_character_split():
@@ -1467,3 +1477,96 @@ def test_normalize_observation_rejects_an_unusable_import_event_id(bad_id):
             route_override=None,
             import_context=ImportContext(source="langfuse", source_scope="s"),
         )
+
+
+def test_a_text_less_observation_still_satisfies_the_capture_contract():
+    row = normalize_observation(make_observation(output=None), route_override=None)
+
+    assert row["response_text"] == ""
+    assert_capture_contract(row)
+
+
+def test_an_observation_without_a_cost_names_no_source():
+    """A named source with no amount behind it would read as a cost of nothing."""
+    observation = make_observation()
+    observation.pop("totalCost", None)
+
+    row = normalize_observation(observation, route_override=None)
+
+    assert "reported_cost_usd" not in row
+    assert "reported_cost_source" not in row
+
+
+def test_anthropic_input_keeps_the_cache_buckets_out_of_the_total():
+    """Anthropic reports input excluding the cached tokens and lists them
+    separately. Folding them in makes those tokens part of the total as well as a
+    bucket of their own, and pricing then charges them at the input rate and the
+    cache rate both -- rates an order of magnitude apart."""
+    usage = map_usage_details(
+        {
+            "input_tokens": 7_553_314,
+            "output_tokens": 1_408_203,
+            "cache_read_input_tokens": 4_506_888,
+            "cache_creation_input_tokens": 1_467_079,
+        },
+        provider="anthropic",
+    )
+
+    assert usage["input_tokens"] == 7_553_314
+    assert usage["cache_read_tokens"] == 4_506_888
+    assert usage["cache_write_tokens"] == 1_467_079
+
+
+def test_openai_input_still_gets_its_subtracted_buckets_back():
+    """Langfuse subtracts the details from the parent for the OpenAI wrapper,
+    while OpenAI's own total includes them, so here the buckets do have to be
+    added back."""
+    usage = map_usage_details(
+        {"input": 100, "output": 40, "input_cached_tokens": 60},
+        provider="openai",
+    )
+
+    assert usage["input_tokens"] == 160
+    assert usage["cache_read_tokens"] == 60
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "bedrock", "aws-bedrock", "AWS"])
+def test_every_cache_exclusive_provider_is_matched_case_insensitively(provider):
+    usage = map_usage_details(
+        {"input_tokens": 100, "cache_read_input_tokens": 60}, provider=provider
+    )
+
+    assert usage["input_tokens"] == 100
+
+
+def test_a_provider_that_is_not_named_keeps_the_previous_behaviour():
+    """A row whose provider cannot be inferred is mapped as before rather than
+    guessing a shape for it."""
+    usage = map_usage_details({"input": 100, "input_cached_tokens": 60})
+
+    assert usage["input_tokens"] == 160
+
+
+def test_an_anthropic_observation_prices_what_anthropic_billed():
+    """The production case. With the buckets folded in, this row was billed
+    $68.56 against the $50.64 Anthropic charged."""
+    from decimal import Decimal as D
+
+    usage = map_usage_details(
+        {
+            "input_tokens": 7_553_314,
+            "output_tokens": 1_408_203,
+            "cache_read_input_tokens": 4_506_888,
+            "cache_creation_input_tokens": 1_467_079,
+        },
+        provider="anthropic",
+    )
+    # Sonnet 4.6: input 3.00, output 15.00, cache read 0.30, cache write 3.75.
+    cost = (
+        D(usage["input_tokens"]) * D("3.00")
+        + D(usage["output_tokens"]) * D("15.00")
+        + D(usage["cache_read_tokens"]) * D("0.30")
+        + D(usage["cache_write_tokens"]) * D("3.75")
+    ) / D(1_000_000)
+
+    assert round(cost, 2) == D("50.64")

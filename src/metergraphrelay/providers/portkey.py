@@ -5,10 +5,13 @@ import math
 import re
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .. import __version__
+from ..billing_evidence import reported_cost
+from ..capture_contract import capture_row, capture_text, capture_tool_calls
 
 
 # Shared with the other sync providers; re-exported here for existing imports.
@@ -49,11 +52,17 @@ def _tool_names(tool_calls: list | None) -> list[str] | None:
 
 
 def _extract_response(response: dict) -> tuple[str | None, list | None]:
+    """Map a Portkey-logged provider response onto (response_text, tool_calls).
+
+    Every branch emits the capture contract (see ``..capture_contract``), never
+    the provider's wire shape: a row the pipeline cannot read is dropped from
+    analysis while still counting as captured traffic.
+    """
     if response.get("object") == "response" and isinstance(
         response.get("output"), list
     ):
         text_parts: list[str] = []
-        tool_calls: list[Any] = []
+        raw_items: list[Any] = []
         for item in response["output"]:
             if not isinstance(item, dict):
                 continue
@@ -62,19 +71,27 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
                     if isinstance(block, dict) and isinstance(block.get("text"), str):
                         text_parts.append(block["text"])
             else:
-                tool_calls.append(item)
-        return ("\n".join(text_parts) or None), (tool_calls or None)
+                raw_items.append(item)
+        return capture_text(text_parts), capture_tool_calls(raw_items)
 
     choices = response.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         message = choices[0].get("message")
         message = message if isinstance(message, dict) else {}
-        response_text = message.get("content")
-        tool_calls = message.get("tool_calls")
-        return (
-            response_text if isinstance(response_text, str) else None,
-            tool_calls if isinstance(tool_calls, list) and tool_calls else None,
-        )
+        content = message.get("content")
+        if isinstance(content, str):
+            text_parts = [content]
+        elif isinstance(content, list):
+            # Multimodal replies carry text in blocks; a tool-only reply carries
+            # no text at all, which the contract spells "".
+            text_parts = [
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ]
+        else:
+            text_parts = []
+        return capture_text(text_parts), capture_tool_calls(message.get("tool_calls"))
 
     content = response.get("content")
     if (
@@ -84,15 +101,15 @@ def _extract_response(response: dict) -> tuple[str | None, list | None]:
         and content
     ):
         text_parts = []
-        tool_calls = []
+        raw_items = []
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 text_parts.append(block["text"])
-            elif block.get("type") == "tool_use":
-                tool_calls.append(block)
-        return ("\n".join(text_parts) or None), (tool_calls or None)
+            else:
+                raw_items.append(block)
+        return capture_text(text_parts), capture_tool_calls(raw_items)
 
     return json.dumps(response), None
 
@@ -222,6 +239,198 @@ def _timestamp_from_epoch(numeric: float, raw: Any) -> datetime:
         ) from exc
 
 
+# Portkey passes the upstream provider's usage block through untouched, so one
+# export carries every vendor's spelling of the same counts. Each is resolved by
+# path and the first present one wins. Reasoning tokens are already inside
+# res_units, so they are detail only and never added to output_tokens.
+_CACHE_READ_PATHS = (
+    ("input_tokens_details", "cached_tokens"),
+    ("prompt_tokens_details", "cached_tokens"),
+    ("cache_read_input_tokens",),
+)
+_CACHE_WRITE_PATHS = (
+    ("cache_creation_input_tokens",),
+    ("input_tokens_details", "cache_write_tokens"),
+)
+# Some responses carry the TTL split in place of the aggregate, so summing the
+# split is the only way to see the total.
+_CACHE_WRITE_5M_PATH = ("cache_creation", "ephemeral_5m_input_tokens")
+_CACHE_WRITE_1H_PATH = ("cache_creation", "ephemeral_1h_input_tokens")
+_CACHE_WRITE_TTL_PATHS = (_CACHE_WRITE_5M_PATH, _CACHE_WRITE_1H_PATH)
+_REASONING_PATHS = (
+    ("output_tokens_details", "reasoning_tokens"),
+    ("completion_tokens_details", "reasoning_tokens"),
+)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _dig(source: Any, path: tuple[str, ...]) -> Any:
+    """Follow a key path through nested dicts, returning None off the path.
+
+    The usage block is provider-supplied and reaches us through an error path as
+    readily as a success one, so any level may be missing or not a dict.
+    """
+    current = source
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _first_int(source: Any, paths: tuple[tuple[str, ...], ...]) -> int | None:
+    for path in paths:
+        value = _dig(source, path)
+        if _is_int(value):
+            return value
+    return None
+
+
+def _first_present(source: Any, paths: tuple[tuple[str, ...], ...]) -> Any:
+    for path in paths:
+        value = _dig(source, path)
+        if value is not None:
+            return value
+    return None
+
+
+def _sum_ints(source: Any, paths: tuple[tuple[str, ...], ...]) -> int | None:
+    values = [value for path in paths if _is_int(value := _dig(source, path))]
+    return sum(values) if values else None
+
+
+def _usage_detail(response: dict) -> dict[str, Any]:
+    """Usage detail from a Portkey row's response, present keys only.
+
+    Absent and zero price differently, so a detail nobody reported stays absent
+    rather than becoming a plausible-looking 0 that hides a capture regression.
+    """
+    usage = response.get("usage")
+    detail: dict[str, Any] = {}
+
+    cache_read = _first_int(usage, _CACHE_READ_PATHS)
+    if cache_read is not None:
+        detail["cache_read_tokens"] = cache_read
+
+    write_5m = _dig(usage, _CACHE_WRITE_5M_PATH)
+    if _is_int(write_5m):
+        detail["cache_write_5m_tokens"] = write_5m
+    write_1h = _dig(usage, _CACHE_WRITE_1H_PATH)
+    if _is_int(write_1h):
+        detail["cache_write_1h_tokens"] = write_1h
+
+    cache_write = _first_int(usage, _CACHE_WRITE_PATHS)
+    if cache_write is None:
+        # Only the TTL split was reported: sum it so a consumer that reads just
+        # cache_write_tokens still sees every written token.
+        cache_write = _sum_ints(usage, _CACHE_WRITE_TTL_PATHS)
+    if cache_write is not None:
+        detail["cache_write_tokens"] = cache_write
+
+    reasoning = _first_int(usage, _REASONING_PATHS)
+    if reasoning is not None:
+        detail["reasoning_tokens"] = reasoning
+
+    # Premium tier and region are request metadata, not counts, and they are
+    # what makes priority/batch and regional pricing answerable at all. The
+    # ingest writer keeps unrecognised keys in calls.meta, so they survive
+    # without a schema change.
+    service_tier = _first_present(
+        {"response": response, "usage": usage},
+        (("response", "service_tier"), ("usage", "service_tier")),
+    )
+    if service_tier is not None:
+        detail["service_tier"] = service_tier
+
+    inference_geo = _dig(usage, ("inference_geo",))
+    if inference_geo is not None:
+        detail["inference_geo"] = inference_geo
+
+    server_tool_use = _dig(usage, ("server_tool_use",))
+    if isinstance(server_tool_use, dict) and server_tool_use:
+        detail["server_tool_use"] = server_tool_use
+
+    grounding_queries = _grounding_queries(response)
+    if grounding_queries is not None:
+        detail["grounding_queries"] = grounding_queries
+
+    searches = _web_search_calls(response)
+    if searches is not None:
+        detail["web_search_calls"] = searches
+
+    return detail
+
+
+def _web_search_calls(response: dict) -> int | None:
+    """How many searches the model ran, for providers that bill per search.
+
+    The count is in the output the model produced, not in `usage`, and a single
+    call runs several. It is a whole charge of its own: on this traffic it is
+    priced per search at a rate the token rates cannot express.
+    """
+    output = response.get("output")
+    if not isinstance(output, list):
+        return None
+    return sum(
+        1
+        for item in output
+        if isinstance(item, dict) and item.get("type") == "web_search_call"
+    )
+
+
+def _cost_usd_from_cents(cents: Any) -> Decimal | None:
+    """A row's cost in dollars, or None when it does not state a usable one.
+
+    Portkey states the cost in cents. Dividing in decimal keeps the value exact:
+    it ends up in a numeric column, and binary rounding introduced here survives
+    the whole way.
+
+    A bool is an int in Python, and ``Decimal("True")`` raises an error the
+    export converter does not catch, so one such row would end the window rather
+    than convert without a cost. A non-finite value is not a cost either.
+    """
+    if isinstance(cents, bool) or not isinstance(cents, (int, float)):
+        return None
+    value = Decimal(str(cents))
+    return value / 100 if value.is_finite() else None
+
+
+def _endpoint(response: dict) -> str | None:
+    """Which provider API the call went to, as the billing evidence names it.
+
+    A gateway's reported cost is only interpretable alongside the endpoint that
+    produced it, because the same gateway prices its endpoints differently.
+    """
+    if response.get("object") == "response":
+        return "responses"
+    if isinstance(response.get("choices"), list):
+        return "chat.completions"
+    return None
+
+
+def _grounding_queries(response: dict) -> int | None:
+    """How many grounding queries a Gemini response ran.
+
+    Google bills grounding per query, not per prompt, and one prompt runs
+    several, so the count cannot be derived from the call count. It sits outside
+    `usage`, under each choice's groundingMetadata.
+    """
+    choices = response.get("choices")
+    if not isinstance(choices, list):
+        return None
+    total = 0
+    seen = False
+    for choice in choices:
+        queries = _dig(choice, ("groundingMetadata", "webSearchQueries"))
+        if isinstance(queries, list):
+            seen = True
+            total += len(queries)
+    return total if seen else None
+
+
 def normalize_portkey_row(
     row: dict, *, import_context: ImportContext | None = None
 ) -> dict:
@@ -259,8 +468,7 @@ def normalize_portkey_row(
         else "portkey/backfill"
     )
 
-    cost = row.get("cost")
-    cost_usd = cost / 100 if isinstance(cost, (int, float)) else None
+    cost_usd = _cost_usd_from_cents(row.get("cost"))
 
     result = {
         "ts": ts,
@@ -272,7 +480,15 @@ def normalize_portkey_row(
         "latency_ms": row.get("response_time"),
         "error": is_error,
         "error_type": error_type,
-        "cost_usd": cost_usd,
+        # Portkey's own figure, named so it can be recognised as a gateway's
+        # amount rather than a number of unknown origin. `cost_usd` stays for
+        # application versions that only read the legacy field.
+        "cost_usd": str(cost_usd) if cost_usd is not None else None,
+        # Stated whether or not a cost came with the row: it is where the call
+        # was served, not a property of the amount.
+        "gateway": "portkey",
+        **reported_cost(cost_usd, source="portkey.cost"),
+        "endpoint": _endpoint(response),
         "request_id": request_id,
         "span_id": request_id,
         "trace_id": trace_id,
@@ -286,11 +502,12 @@ def normalize_portkey_row(
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    result.update(_usage_detail(response))
     if import_context is not None:
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope
         result["import_event_id"] = import_event_id  # validated, stripped id
-    return result
+    return capture_row(result)
 
 
 def convert_portkey_export(

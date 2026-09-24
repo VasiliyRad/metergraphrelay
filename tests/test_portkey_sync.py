@@ -415,6 +415,41 @@ def test_over_threshold_cancels_unstarted_hourly_draft_and_splits_into_ten():
     assert mg.completed == ["lease-1"]                 # completed only after all ten pushed
 
 
+def test_cancel_failure_on_unstarted_hourly_draft_does_not_abort_the_split(capsys):
+    full = (WINDOW_START, WINDOW_END)
+
+    class CancelFailure(FakePortkey):
+        def cancel_export(self, export_id):
+            self.cancelled.append(export_id)
+            raise PortkeyExportError(
+                "Portkey export request failed: HTTP 400 Bad Request"
+            )
+
+    pk = CancelFailure({}, totals={full: VOLUME_SPLIT_THRESHOLD + 1})
+    original_create = pk.create_export
+
+    def seeding_create(*, window_start, window_end):
+        pk._rows.setdefault((window_start, window_end), [_portkey_row(f"r-{window_start}")])
+        return original_create(window_start=window_start, window_end=window_end)
+
+    pk.create_export = seeding_create
+    mg = FakeMeterGraph(_acquired())
+
+    outcome = _run(mg, pk, [])
+
+    assert outcome.status == "completed"
+    assert outcome.exit_code == 0
+    assert pk.cancelled == ["exp-1"]
+    assert len(pk.created) == 1 + 10
+    assert pk.started == [f"exp-{i}" for i in range(2, 12)]
+    assert mg.completed == ["lease-1"]
+    assert mg.abandoned == []
+    stderr = capsys.readouterr().err
+    assert "Warning" in stderr
+    assert "exp-1" in stderr
+    assert "400" in stderr
+
+
 def test_boundary_total_exactly_at_threshold_does_not_split():
     # total == 50_000 is NOT over the threshold: the hourly draft is used as-is.
     full = (WINDOW_START, WINDOW_END)
@@ -445,6 +480,30 @@ def test_subwindow_still_over_threshold_is_rejected_without_recursion():
     assert "exp-1" in pk.cancelled                      # unstarted hourly draft cancelled
     assert pk.started == []                             # nothing was ever started
     assert str(VOLUME_SPLIT_THRESHOLD) in outcome.detail or "recursiv" in outcome.detail.lower()
+
+
+def test_failed_hourly_cancel_is_not_retried_during_later_cleanup():
+    full = (WINDOW_START, WINDOW_END)
+
+    class CancelFailure(FakePortkey):
+        def cancel_export(self, export_id):
+            self.cancelled.append(export_id)
+            if export_id == "exp-1":
+                raise PortkeyExportError(
+                    "Portkey export request failed: HTTP 400 Bad Request"
+                )
+
+    pk = CancelFailure({}, totals={full: VOLUME_SPLIT_THRESHOLD + 1},
+                       default_total=VOLUME_SPLIT_THRESHOLD + 1)
+    mg = FakeMeterGraph(_acquired())
+
+    outcome = _run(mg, pk, [])
+
+    assert outcome.status == "failed"
+    assert outcome.exit_code == 1
+    assert mg.completed == []
+    assert mg.abandoned == ["lease-1"]
+    assert pk.cancelled.count("exp-1") == 1
 
 
 def test_planning_valueerror_from_bad_window_bounds_is_handled_failure():

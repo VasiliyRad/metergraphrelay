@@ -23,6 +23,8 @@ from metergraphrelay.providers.langsmith import (
     resolve_project_ids,
 )
 
+from test_capture_contract import assert_capture_contract
+
 PROJECT_ID = "5f6c1a2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b"
 
 
@@ -309,3 +311,28 @@ def test_pull_langsmith_caps_page_limit_and_rejects_repeated_cursor(tmp_path):
 def test_pull_langsmith_requires_a_project(tmp_path):
     with pytest.raises(LangSmithAPIError, match="at least one project"):
         _pull(tmp_path, projects=[])
+
+
+def test_a_text_less_run_still_satisfies_the_capture_contract():
+    row = normalize_run(make_run(outputs=None), route_override=None)
+
+    assert row["response_text"] == ""
+    assert_capture_contract(row)
+
+
+def test_the_cost_langsmith_reported_is_named_as_its_own_figure():
+    """LangSmith totals this from the tokens it observed, so it is an estimate
+    rather than an amount a provider charged. Naming the source is what keeps an
+    audit able to tell the two apart."""
+    row = normalize_run(make_run(total_cost=0.0042), route_override=None)
+
+    assert row["reported_cost_usd"] == "0.0042"
+    assert row["reported_cost_source"] == "langsmith.total_cost"
+    assert "gateway" not in row
+
+
+def test_a_run_without_a_cost_names_no_source():
+    row = normalize_run(make_run(), route_override=None)
+
+    if row.get("cost_usd") is None:
+        assert "reported_cost_source" not in row

@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 import os
 from unittest.mock import patch
 
@@ -12,6 +13,8 @@ from metergraphrelay.providers.portkey import (
     convert_portkey_export,
     normalize_portkey_row,
 )
+
+from test_capture_contract import assert_capture_contract
 
 
 def _responses_row(**overrides):
@@ -162,7 +165,9 @@ def test_normalize_portkey_row_maps_verified_fields():
     assert result["status"] == "success"
     assert result["error"] is False
     assert result["error_type"] is None
-    assert result["cost_usd"] == 0.125
+    # A string, so the cents division cannot round: this is the field the
+    # server reads when it has no provenance for the amount.
+    assert result["cost_usd"] == "0.125"
     assert result["request_id"] == "pk-req-1"
     assert result["span_id"] == "pk-req-1"
     assert result["trace_id"] == "trace-1"
@@ -306,12 +311,14 @@ def test_normalize_portkey_row_vertex_function_style_google_search():
 
     result = normalize_portkey_row(row)
 
-    assert result["response_text"] is None
+    # A tool-only reply has no text, which the capture contract spells "" --
+    # None would mark the whole result malformed and drop the row.
+    assert result["response_text"] == ""
     assert result["tool_calls"] == [
         {
-            "id": "call-1",
-            "type": "function",
-            "function": {"name": "google_search", "arguments": '{"query": "cats"}'},
+            "call_id": "call-1",
+            "name": "google_search",
+            "arguments": '{"query": "cats"}',
         }
     ]
     assert result["tool_names"] == ["google_search"]
@@ -325,10 +332,9 @@ def test_normalize_portkey_row_anthropic_native_tools():
     assert result["response_text"] == "Let me check that for you."
     assert result["tool_calls"] == [
         {
-            "type": "tool_use",
-            "id": "toolu-1",
+            "call_id": "toolu-1",
             "name": "get_weather",
-            "input": {"location": "SF"},
+            "arguments": '{"location": "SF"}',
         }
     ]
     assert result["tool_names"] == ["get_weather"]
@@ -890,3 +896,317 @@ def test_convert_portkey_export_propagates_on_progress_exception(tmp_path):
 
     with pytest.raises(_StopConvert):
         convert_portkey_export(str(input_path), str(output_path), on_progress=_boom)
+
+
+def test_every_normalized_row_satisfies_the_capture_contract():
+    """A row the pipeline marks unusable is dropped from analysis while still
+    counting as captured traffic, so the contract is checked on every shape
+    Portkey logs, not only on the ones with an assertion of their own."""
+    for build in (_responses_row, _chat_completion_row, _anthropic_row):
+        assert_capture_contract(normalize_portkey_row(build()))
+
+
+def test_anthropic_tool_only_reply_keeps_its_answer_and_stays_readable():
+    """A forced-tool call carries its whole answer in the tool call and no text.
+    This is the shape that silently removed a customer's Anthropic traffic from
+    every analysis."""
+    row = _anthropic_row()
+    row["response"]["content"] = [
+        {"type": "tool_use", "id": "toolu-9", "name": "emit_audit", "input": {"score": 7}}
+    ]
+
+    result = normalize_portkey_row(row)
+
+    assert result["response_text"] == ""
+    assert result["tool_calls"] == [
+        {"call_id": "toolu-9", "name": "emit_audit", "arguments": '{"score": 7}'}
+    ]
+    assert_capture_contract(result)
+
+
+def test_openai_reasoning_items_are_dropped_without_taking_the_row_with_them():
+    row = _responses_row()
+    row["response"]["output"].insert(
+        0, {"type": "reasoning", "id": "rs-1", "summary": [], "encrypted_content": "x"}
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["response_text"] == "Here is the latest on X."
+    assert [call.get("type") for call in result["tool_calls"]] == ["web_search_call"]
+    assert_capture_contract(result)
+
+
+def _usage_row(usage, *, response_extra=None):
+    row = _responses_row()
+    row["response"] = {"object": "response", "usage": usage, **(response_extra or {})}
+    return row
+
+
+def test_openai_responses_cache_and_reasoning_detail_survives():
+    """Cached tokens sit inside the input total here, so losing the count bills
+    them at the input rate instead of the far cheaper cache rate."""
+    row = _usage_row(
+        {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 25},
+            "output_tokens_details": {"reasoning_tokens": 18},
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["cache_read_tokens"] == 60
+    assert result["cache_write_tokens"] == 25
+    assert result["reasoning_tokens"] == 18
+    # Reasoning is already inside the output total and must not be added again.
+    assert result["output_tokens"] == 40
+
+
+def test_chat_completions_and_xai_cache_shape_survives():
+    row = _usage_row(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens": 55},
+            "completion_tokens_details": {"reasoning_tokens": 9},
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["cache_read_tokens"] == 55
+    assert result["reasoning_tokens"] == 9
+
+
+def test_anthropic_cache_ttl_split_is_kept_and_totalled():
+    """A 5-minute and a one-hour cache write are priced differently, so the
+    split has to survive, and the aggregate still has to cover both."""
+    row = _usage_row(
+        {
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "cache_read_input_tokens": 70,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 12,
+                "ephemeral_1h_input_tokens": 8,
+            },
+            "service_tier": "standard",
+            "inference_geo": "global",
+        }
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["cache_read_tokens"] == 70
+    assert result["cache_write_5m_tokens"] == 12
+    assert result["cache_write_1h_tokens"] == 8
+    assert result["cache_write_tokens"] == 20
+    assert result["service_tier"] == "standard"
+    assert result["inference_geo"] == "global"
+
+
+def test_aggregate_cache_write_wins_over_the_ttl_split():
+    row = _usage_row(
+        {
+            "cache_creation_input_tokens": 30,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 12,
+                "ephemeral_1h_input_tokens": 8,
+            },
+        }
+    )
+
+    assert normalize_portkey_row(row)["cache_write_tokens"] == 30
+
+
+def test_grounding_queries_are_counted_across_choices():
+    """Grounding is billed per query and one prompt runs several, so the count
+    cannot be derived from the call count."""
+    row = _usage_row(
+        {"prompt_tokens": 100, "completion_tokens": 40},
+        response_extra={
+            "choices": [
+                {"groundingMetadata": {"webSearchQueries": ["a", "b", "c"]}},
+                {"groundingMetadata": {"webSearchQueries": ["d"]}},
+            ]
+        },
+    )
+
+    assert normalize_portkey_row(row)["grounding_queries"] == 4
+
+
+def test_server_tool_use_counts_survive():
+    row = _usage_row(
+        {"server_tool_use": {"web_search_requests": 3, "web_fetch_requests": 1}}
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["server_tool_use"] == {
+        "web_search_requests": 3,
+        "web_fetch_requests": 1,
+    }
+
+
+def test_service_tier_on_the_response_body_is_carried():
+    row = _usage_row({"prompt_tokens": 1}, response_extra={"service_tier": "default"})
+
+    assert normalize_portkey_row(row)["service_tier"] == "default"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"object": "response"},
+        {"object": "response", "usage": None},
+        {"object": "response", "usage": "not-a-dict"},
+        {"error": {"message": "upstream failed"}},
+    ],
+)
+def test_a_row_without_usage_detail_emits_no_detail_keys(response):
+    """A detail nobody reported stays absent, so a later capture regression
+    cannot hide behind a plausible 0."""
+    row = _responses_row()
+    row["response"] = response
+
+    result = normalize_portkey_row(row)
+
+    for key in (
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cache_write_5m_tokens",
+        "cache_write_1h_tokens",
+        "reasoning_tokens",
+        "service_tier",
+        "inference_geo",
+        "server_tool_use",
+        "grounding_queries",
+    ):
+        assert key not in result
+
+
+def test_a_zero_cache_read_is_recorded_as_zero_not_dropped():
+    """A reported 0 means caching was off for that call, which is not the same
+    as the provider reporting nothing."""
+    row = _usage_row({"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}})
+
+    assert normalize_portkey_row(row)["cache_read_tokens"] == 0
+
+
+def test_the_gateway_figure_is_named_so_it_can_be_recognised():
+    """A reported cost is only usable as evidence if its origin is identifiable.
+    Without the gateway and source, it is a number of unknown provenance that
+    billing has no grounds to prefer over a verified rate."""
+    row = _responses_row(cost=72.72)
+
+    result = normalize_portkey_row(row)
+
+    assert result["gateway"] == "portkey"
+    assert result["reported_cost_source"] == "portkey.cost"
+    assert result["endpoint"] == "responses"
+
+
+def test_the_gateway_figure_keeps_every_digit_portkey_stated():
+    """Cents divided in binary floating point lands in a numeric column carrying
+    rounding that no later step can remove."""
+    row = _responses_row(cost=193947.66285)
+
+    result = normalize_portkey_row(row)
+
+    # Both fields, because the server reads the named one only from a source it
+    # has provenance for and falls back to `cost_usd` otherwise.
+    assert result["reported_cost_usd"] == "1939.4766285"
+    assert result["cost_usd"] == "1939.4766285"
+    # Dividing the same cents in binary floating point loses the last digits,
+    # and the server stores whatever it is handed.
+    assert str(Decimal(str(193947.66285 / 100))) == "1939.4766284999998"
+
+
+def test_a_chat_completions_row_is_named_by_its_own_endpoint():
+    row = _responses_row()
+    row["response"] = {"choices": [{"message": {"content": "hi"}}]}
+
+    assert normalize_portkey_row(row)["endpoint"] == "chat.completions"
+
+
+def test_a_row_without_a_cost_carries_no_source_to_trust():
+    row = _responses_row(cost=None)
+
+    result = normalize_portkey_row(row)
+
+    # Absent, not null: a source named with no amount behind it would read as a
+    # cost of nothing rather than as no cost reported.
+    assert "reported_cost_usd" not in result
+    assert "reported_cost_source" not in result
+    # The gateway is still known; only the amount is missing.
+    assert result["gateway"] == "portkey"
+
+
+def test_web_search_calls_are_counted_from_the_output():
+    """Searches are billed per search at a rate token rates cannot express, and
+    the count is in the output rather than in usage."""
+    row = _responses_row()
+    row["response"] = {
+        "object": "response",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "output": [
+            {"type": "web_search_call", "id": "ws-1"},
+            {"type": "web_search_call", "id": "ws-2"},
+            {"type": "message", "content": [{"text": "hi"}]},
+        ],
+    }
+
+    assert normalize_portkey_row(row)["web_search_calls"] == 2
+
+
+def test_a_response_that_ran_no_search_reports_none_rather_than_nothing():
+    """Zero searches is a fact about the call; a missing output array is not."""
+    row = _responses_row()
+    row["response"] = {"object": "response", "usage": {}, "output": []}
+    assert normalize_portkey_row(row)["web_search_calls"] == 0
+
+    row["response"] = {"choices": [{"message": {"content": "hi"}}]}
+    assert "web_search_calls" not in normalize_portkey_row(row)
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [True, False, float("nan"), float("inf"), float("-inf"), "0.02", [], {}, None],
+)
+def test_a_cost_that_is_not_a_number_leaves_the_row_without_one(cost):
+    """A bool is an int in Python, so it reaches the conversion, and
+    `Decimal("True")` raises an error the export converter does not catch. A row
+    stating no usable cost has to convert without one rather than fail."""
+    result = normalize_portkey_row(_responses_row(cost=cost))
+
+    assert result["cost_usd"] is None
+    assert "reported_cost_usd" not in result
+    assert "reported_cost_source" not in result
+    # The row is still a Portkey row; only the amount is missing.
+    assert result["gateway"] == "portkey"
+
+
+def test_a_malformed_cost_does_not_abort_the_export_window(tmp_path):
+    """One unusable value must not take the whole window with it: the converter
+    catches a malformed row, but not every exception a row can raise."""
+    input_path = tmp_path / "export.jsonl"
+    output_path = tmp_path / "rows.jsonl"
+    input_path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                _responses_row(id="row-1", trace_id="t-1", cost=72.72),
+                _responses_row(id="row-2", trace_id="t-2", cost=True),
+                _responses_row(id="row-3", trace_id="t-3", cost=193947.66285),
+            )
+        )
+        + "\n"
+    )
+
+    converted, skipped = convert_portkey_export(str(input_path), str(output_path))
+
+    assert (converted, skipped) == (3, 0)
+    costs = [json.loads(line)["cost_usd"] for line in output_path.read_text().splitlines()]
+    assert costs == ["0.7272", None, "1939.4766285"]

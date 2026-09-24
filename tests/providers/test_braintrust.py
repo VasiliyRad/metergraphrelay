@@ -22,6 +22,8 @@ from metergraphrelay.providers.braintrust import (
     pull_braintrust,
 )
 
+from test_capture_contract import assert_capture_contract
+
 
 def make_span(**overrides):
     span = {
@@ -348,12 +350,19 @@ def test_extract_output_reads_a_plain_string():
 
 
 def test_extract_output_keeps_tool_calls_from_a_message_object():
-    tool_calls = [{"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}]
     text, calls = _extract_output(
-        {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}
+            ],
+        }
     )
     assert text is None
-    assert calls == tool_calls
+    # The wire shape is converted: the pipeline reads one tool-call shape and
+    # rejects the whole row, response included, when given any other.
+    assert calls == [{"call_id": "c1", "name": "lookup", "arguments": "{}"}]
 
 
 def test_extract_output_reads_anthropic_content_blocks():
@@ -364,7 +373,9 @@ def test_extract_output_reads_anthropic_content_blocks():
         ]
     )
     assert text == "thinking out loud"
-    assert calls == [{"type": "tool_use", "name": "search", "input": {}}]
+    # This block records no id, so the call is identified by its position
+    # rather than dropped, which would report a tool turn as text alone.
+    assert calls == [{"call_id": "tool-0", "name": "search", "arguments": "{}"}]
 
 
 def test_extract_output_serializes_an_unrecognized_shape():
@@ -562,15 +573,24 @@ def test_normalize_span_splits_input_into_request_json_and_text():
 
 
 def test_normalize_span_records_tool_calls_and_names():
-    tool_calls = [{"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}]
     row = normalize_span(
         make_span(
-            output={"role": "assistant", "content": None, "tool_calls": tool_calls}
+            output={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}
+                ],
+            }
         ),
         route_override=None,
     )
-    assert row["tool_calls"] == tool_calls
+    assert row["tool_calls"] == [
+        {"call_id": "c1", "name": "lookup", "arguments": "{}"}
+    ]
     assert row["tool_names"] == ["lookup"]
+    # A tool-only turn has no text, which the contract spells "".
+    assert row["response_text"] == ""
 
 
 def test_normalize_span_falls_back_to_the_row_id_when_span_id_is_absent():
@@ -862,3 +882,25 @@ def test_normalize_span_rejects_an_unusable_import_event_id(bad_id):
             route_override=None,
             import_context=ImportContext(source="braintrust", source_scope="proj"),
         )
+
+
+def test_a_text_less_reply_still_satisfies_the_capture_contract():
+    """A span with nothing recorded as output used to normalize to
+    response_text None, which the pipeline reads as a malformed result and
+    drops before classification -- silently, while the row still bills."""
+    row = normalize_span(make_span(output=None), route_override=None)
+
+    assert row["response_text"] == ""
+    assert_capture_contract(row)
+
+
+def test_the_cost_braintrust_estimated_is_named_as_an_estimate():
+    """Braintrust computes this from the tokens it observed against its own
+    price table -- the field is called `estimated_cost`. Naming the source keeps
+    it from being read as an amount a provider charged."""
+    row = normalize_span(make_span(estimated_cost=0.0042), route_override=None)
+
+    assert row["reported_cost_usd"] == "0.0042"
+    assert row["reported_cost_source"] == "braintrust.estimated_cost"
+    # Not a gateway: it never sat in the request path.
+    assert "gateway" not in row

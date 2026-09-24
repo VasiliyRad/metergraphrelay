@@ -6,10 +6,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable
 
 from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
+from ..window import normalize_utc_designator
 
 # Docs-verified Portkey beta Logs Export contract
 # (/api-reference/admin-api/data-plane/logs/log-exports-beta/).
@@ -85,6 +87,26 @@ class PortkeyExport:
         return self.status == STATUS_SUCCESS
 
 
+def portkey_timestamp(value: str) -> str:
+    """An aware ISO 8601 instant in the form Portkey's export job accepts.
+
+    The draft endpoint accepts any aware ISO string and counts the rows, but
+    the job that runs the export fails, with no reason given, when the
+    filter carries a numeric offset such as ``+00:00``, which is what
+    ``datetime.isoformat`` produces. Portkey's own UI sends ``Z``. So the
+    instant is converted to UTC and written with a ``Z`` designator.
+    """
+    normalized = normalize_utc_designator(value)
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise PortkeyExportError(f"export window bound must be an aware ISO 8601 instant: {value!r}")
+    parsed = parsed.astimezone(timezone.utc)
+    text = parsed.strftime("%Y-%m-%dT%H:%M:%S")
+    if parsed.microsecond:
+        text += f".{parsed.microsecond:06d}".rstrip("0")
+    return text + "Z"
+
+
 class PortkeyExportClient:
     def __init__(self, api_key: str, *, workspace: str | None = None,
                  base_url: str = DEFAULT_PORTKEY_URL, timeout: float = 30.0):
@@ -145,10 +167,15 @@ class PortkeyExportClient:
     def create_export(self, *, window_start: str, window_end: str) -> PortkeyExport:
         body = {
             "filters": {
-                "time_of_generation_min": window_start,
-                "time_of_generation_max": window_end,
+                "time_of_generation_min": portkey_timestamp(window_start),
+                "time_of_generation_max": portkey_timestamp(window_end),
                 "page_size": PAGE_SIZE_MAX,
-                "current_page": 1,
+                # Portkey numbers export pages from zero. Page 1 is the second
+                # page of a single-page export: Portkey fails that job, or on
+                # some windows produces an empty file, so nothing with rows
+                # ever imports. Every export made from Portkey's own UI
+                # carries page 0.
+                "current_page": 0,
             },
             "requested_data": list(REQUESTED_DATA),
             "description": EXPORT_DESCRIPTION,
@@ -189,7 +216,7 @@ class PortkeyExportClient:
         return PortkeyExport(export_id=returned_id, total=None, status=status)
 
     def cancel_export(self, export_id: str) -> None:
-        self._api_request("POST", self._export_path(export_id, "/cancel"), body={})
+        self._api_request("POST", self._export_path(export_id, "/cancel"), body=None)
 
     def download_to(
         self, export_id: str, dest_path: str, *, on_progress: Callable[[], None] | None = None

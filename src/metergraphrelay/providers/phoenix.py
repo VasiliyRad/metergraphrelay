@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
+from ..capture_contract import capture_response_text, capture_row
 from ..window import normalize_utc_designator
 from ..import_identity import ImportContext, canonical_import_event_id
 
@@ -388,7 +389,7 @@ def normalize_span(
         "content_opted_in": True,
         "request_json": request_json,
         "request_text": request_text,
-        "response_text": _response_text(attributes),
+        "response_text": capture_response_text(_response_text(attributes)),
         "tool_names": _tool_names(attributes),
         "trace_id": context.get("trace_id"),
         "span_id": span_id,
@@ -400,7 +401,7 @@ def normalize_span(
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(span_id)
-    return row
+    return capture_row(row)
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:

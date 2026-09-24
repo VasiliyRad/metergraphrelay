@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
+from ..billing_evidence import reported_cost
+from ..capture_contract import capture_response_text, capture_row, capture_tool_calls
 from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
 
@@ -284,14 +286,11 @@ def _content_blocks(blocks: list) -> tuple[str | None, list | None]:
             text_parts.append(block["text"])
         elif block.get("type") == "tool_use":
             tool_calls.append(block)
-    return ("\n".join(text_parts) or None), (tool_calls or None)
+    return ("\n".join(text_parts) or None), capture_tool_calls(tool_calls)
 
 
 def _message_output(message: dict[str, Any]) -> tuple[str | None, list | None]:
-    raw_tool_calls = message.get("tool_calls")
-    tool_calls = (
-        raw_tool_calls if isinstance(raw_tool_calls, list) and raw_tool_calls else None
-    )
+    tool_calls = capture_tool_calls(message.get("tool_calls"))
     content = message.get("content")
     if isinstance(content, str):
         return (content or None), tool_calls
@@ -520,6 +519,7 @@ def normalize_span(
         "reasoning_tokens": usage["reasoning_tokens"],
         "latency_ms": usage["latency_ms"],
         "cost_usd": _cost_usd(span, metrics),
+        **reported_cost(_cost_usd(span, metrics), source="braintrust.estimated_cost"),
         "error": error,
         "error_type": _error_type(raw_error) if error else None,
         "request_id": span["id"],
@@ -528,7 +528,7 @@ def normalize_span(
         "content_opted_in": True,
         "request_json": request_json,
         "request_text": request_text,
-        "response_text": response_text,
+        "response_text": capture_response_text(response_text),
         "tool_calls": tool_calls,
         "tool_names": _tool_names(tool_calls),
         "trace_id": span.get("root_span_id"),
@@ -541,7 +541,7 @@ def normalize_span(
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(span.get("id"))
-    return row
+    return capture_row(row)
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:

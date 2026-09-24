@@ -19,6 +19,8 @@ from metergraphrelay.providers.phoenix import (
     pull_phoenix,
 )
 
+from test_capture_contract import assert_capture_contract
+
 
 def make_span(**overrides):
     """One LLM span shaped the way GET /v1/projects/{p}/spans returns it."""
@@ -296,7 +298,7 @@ def test_normalize_span_normalizes_z_designator_and_tolerates_missing_end():
     span = make_span(start_time="2026-08-10T12:00:00Z", end_time=None)
     row = normalize_span(span, project="p", route_override=None)
     assert row["ts"] == "2026-08-10T12:00:00+00:00"
-    assert row["latency_ms"] is None
+    assert "latency_ms" not in row
 
 
 def test_normalize_span_requires_start_time():
@@ -518,7 +520,7 @@ def test_tool_names_are_read_from_every_output_message():
 def test_latency_survives_a_naive_and_aware_timestamp_pair():
     span = make_span(start_time="2026-09-03T22:23:12+00:00", end_time="2026-09-03T22:23:13")
     row = normalize_span(span, project="p", route_override=None)
-    assert row["latency_ms"] is None
+    assert "latency_ms" not in row
     assert row["input_tokens"] == 305  # the span itself still imports
 
 
@@ -603,3 +605,17 @@ def test_pull_phoenix_ticks_progress_per_page_and_per_row_including_skipped(tmp_
     # only skips still renews the lease.
     assert (imported, skipped) == (2, 1)
     assert len(ticks) == 5
+
+
+def test_a_text_less_span_still_satisfies_the_capture_contract():
+    span = make_span()
+    span["attributes"] = {
+        key: value
+        for key, value in span["attributes"].items()
+        if "output" not in key
+    }
+
+    row = normalize_span(span, project="p", route_override=None)
+
+    assert row["response_text"] == ""
+    assert_capture_contract(row)

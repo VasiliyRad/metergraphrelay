@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
+from ..billing_evidence import reported_cost
+from ..capture_contract import capture_response_text, capture_row
 from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
@@ -301,6 +303,19 @@ _REASONING_KEYS = (
 )
 _NON_BUCKET_MARKERS = ("priority",)
 
+# Providers whose own usage reports input *excluding* the cached tokens, which
+# it lists separately. metergraph prices cache handling per publisher, so a row
+# has to arrive in the shape that publisher's API uses: for one of these,
+# folding the cache buckets into input makes those tokens part of the input
+# total as well as a bucket of their own, and they are billed twice -- once at
+# the input rate and once at the cache rate, an order of magnitude apart.
+#
+# For OpenAI and Google the opposite is true: their own totals include the
+# cached tokens, so the buckets Langfuse subtracted do have to be added back.
+_CACHE_EXCLUSIVE_INPUT_PROVIDERS = frozenset(
+    {"anthropic", "bedrock", "aws-bedrock", "aws", "amazon-bedrock"}
+)
+
 
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
@@ -319,17 +334,26 @@ def _first_int(source: dict[str, Any], keys: tuple[str, ...]) -> int | None:
 
 
 def _total_with_buckets(
-    usage_details: dict[str, Any], total_keys: tuple[str, ...], marker: str
+    usage_details: dict[str, Any],
+    total_keys: tuple[str, ...],
+    marker: str,
+    *,
+    skip_keys: tuple[str, ...] = (),
 ) -> int | None:
-    """The named total plus every other integer bucket carrying ``marker``."""
+    """The named total plus every other integer bucket carrying ``marker``.
+
+    ``skip_keys`` names buckets the total already excludes by the provider's own
+    convention, so adding them would count those tokens twice.
+    """
     total_key, total = _first_int_key(usage_details, total_keys)
     if total_key is None:
         return None
+    skipped = {key.lower() for key in skip_keys}
     for key, value in usage_details.items():
         if key == total_key or not _is_int(value):
             continue
         lowered = key.lower()
-        if marker not in lowered:
+        if marker not in lowered or lowered in skipped:
             continue
         if any(skip in lowered for skip in _NON_BUCKET_MARKERS):
             continue
@@ -337,8 +361,15 @@ def _total_with_buckets(
     return total
 
 
-def map_usage_details(usage_details: Any) -> dict[str, int | None]:
-    """Map one observation's usageDetails onto metergraph token fields."""
+def map_usage_details(
+    usage_details: Any, *, provider: str | None = None
+) -> dict[str, int | None]:
+    """Map one observation's usageDetails onto metergraph token fields.
+
+    ``provider`` decides whether the cache buckets belong inside the input
+    total, because that is a property of the provider's own usage shape rather
+    than of Langfuse's.
+    """
     if not isinstance(usage_details, dict):
         return {
             "input_tokens": None,
@@ -347,8 +378,16 @@ def map_usage_details(usage_details: Any) -> dict[str, int | None]:
             "cache_write_tokens": None,
             "reasoning_tokens": None,
         }
+    cache_exclusive = (
+        str(provider or "").strip().lower() in _CACHE_EXCLUSIVE_INPUT_PROVIDERS
+    )
     return {
-        "input_tokens": _total_with_buckets(usage_details, _INPUT_TOTAL_KEYS, "input"),
+        "input_tokens": _total_with_buckets(
+            usage_details,
+            _INPUT_TOTAL_KEYS,
+            "input",
+            skip_keys=(_CACHE_READ_KEYS + _CACHE_WRITE_KEYS) if cache_exclusive else (),
+        ),
         "output_tokens": _total_with_buckets(usage_details, _OUTPUT_TOTAL_KEYS, "output"),
         "cache_read_tokens": _first_int(usage_details, _CACHE_READ_KEYS),
         "cache_write_tokens": _first_int(usage_details, _CACHE_WRITE_KEYS),
@@ -386,7 +425,8 @@ def normalize_observation(
         raw_status_message if error and isinstance(raw_status_message, str) else None
     )
 
-    usage = map_usage_details(observation.get("usageDetails"))
+    provider = infer_provider(observation)
+    usage = map_usage_details(observation.get("usageDetails"), provider=provider)
     request_json, request_text = _map_content(observation.get("input"))
     response_text = _response_text(observation.get("output"))
 
@@ -397,7 +437,7 @@ def normalize_observation(
         "source": "langfuse",
         "sdk": "metergraphrelay",
         "sdk_version": __version__,
-        "provider": infer_provider(observation),
+        "provider": provider,
         "model": model,
         "status": "error" if error else "success",
         "input_tokens": usage["input_tokens"],
@@ -406,6 +446,7 @@ def normalize_observation(
         "cache_write_tokens": usage["cache_write_tokens"],
         "reasoning_tokens": usage["reasoning_tokens"],
         "cost_usd": observation.get("totalCost"),
+        **reported_cost(observation.get("totalCost"), source="langfuse.observation.totalCost"),
         "error": error,
         "error_type": error_type,
         "request_id": observation["id"],
@@ -414,7 +455,7 @@ def normalize_observation(
         "content_opted_in": True,
         "request_json": request_json,
         "request_text": request_text,
-        "response_text": response_text,
+        "response_text": capture_response_text(response_text),
         "trace_id": observation["traceId"],
         "span_id": observation["id"],
         "parent_span_id": observation.get("parentObservationId"),
@@ -428,7 +469,7 @@ def normalize_observation(
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(observation.get("id"))
-    return row
+    return capture_row(row)
 
 
 def _cleanup_temp_file(tmp_path: str) -> None:

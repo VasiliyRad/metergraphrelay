@@ -528,6 +528,9 @@ records**, the run splits it **once** into **10 sub-windows with
 absorbs the boundary overlaps). This split is one-shot, never recursive:
 if any single sub-window *still* exceeds 50,000 records, the run fails
 with a clear error rather than splitting further.
+Before splitting, the run cancels the never-started hourly draft on a best effort
+basis. If Portkey refuses the cancel, the run warns and continues because an
+unstarted draft only counts rows and exports nothing.
 
 **Before running this against your own data:** as in manual mode,
 request and response content is uploaded to metergraph, with no opt-out.
