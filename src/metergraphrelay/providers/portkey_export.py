@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from .. import __version__
+from ..http_limits import ResponseTooLarge, read_bounded
 from ..window import normalize_utc_designator
 
 # Docs-verified Portkey beta Logs Export contract
@@ -47,6 +48,24 @@ _ALL_STATUSES = frozenset(
 # every _DOWNLOAD_CHUNK_SIZE bytes — a bounded cadence a caller can use to renew
 # a lease during a long download.
 _DOWNLOAD_CHUNK_SIZE = 1 << 16  # 64 KiB
+_MAX_DOWNLOAD_BYTES = 1 << 30  # 1 GiB hard ceiling for one signed export
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "redirects are not followed for Portkey endpoints",
+            headers,
+            fp,
+        )
+
+
+_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirects(),
+)
 
 
 class PortkeyExportError(Exception):
@@ -114,15 +133,17 @@ class PortkeyExportClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with _OPENER.open(request, timeout=self._timeout) as response:
                 self._check_status(response.status)
-                return response.read()
+                return read_bounded(response)
         except urllib.error.HTTPError as exc:
             raise PortkeyExportError(
                 f"Portkey export request failed: HTTP {exc.code} {exc.reason}"
             ) from exc
         except urllib.error.URLError as exc:
             raise PortkeyExportError(f"Portkey export request failed: {exc.reason}") from exc
+        except ResponseTooLarge as exc:
+            raise PortkeyExportError(str(exc)) from exc
 
     @staticmethod
     def _parse(raw: bytes) -> dict:
@@ -236,7 +257,7 @@ class PortkeyExportClient:
         )
         tmp_path = f"{dest_path}.part"
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with _OPENER.open(request, timeout=self._timeout) as response:
                 self._check_status(response.status)
                 with open(tmp_path, "wb") as dst:
                     lines = self._pump(response, dst, on_progress)
@@ -258,11 +279,17 @@ class PortkeyExportClient:
     def _pump(response, dst, on_progress: Callable[[], None] | None) -> int:
         """Stream response into dst, counting nonblank lines across chunk boundaries."""
         lines = 0
+        total_bytes = 0
         current_has_content = False  # does the line still being assembled hold any nonblank byte?
         while True:
             chunk = response.read(_DOWNLOAD_CHUNK_SIZE)
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_DOWNLOAD_BYTES:
+                raise PortkeyExportError(
+                    f"Portkey signed download exceeds the {_MAX_DOWNLOAD_BYTES}-byte limit"
+                )
             dst.write(chunk)
             segments = chunk.split(b"\n")
             for i, segment in enumerate(segments):

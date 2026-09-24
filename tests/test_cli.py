@@ -152,9 +152,9 @@ def test_main_pull_langfuse_dispatches_to_pull_langfuse(tmp_path):
     )
 
 
-def test_main_pull_langfuse_credential_flags_override_env(tmp_path):
+def test_main_pull_langfuse_credentials_are_loaded_from_env(tmp_path):
     env_file = tmp_path / ".env"
-    env_file.write_text("")
+    env_file.write_text("LANGFUSE_PUBLIC_KEY=pk-env\nLANGFUSE_SECRET_KEY=sk-env\n")
 
     with patch(
         "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
@@ -165,27 +165,25 @@ def test_main_pull_langfuse_credential_flags_override_env(tmp_path):
                 "langfuse",
                 "--env-file",
                 str(env_file),
-                "--langfuse-public-key",
-                "pk-cli",
-                "--langfuse-secret-key",
-                "sk-cli",
                 "--until",
                 "2026-08-07T00:00:00+00:00",
             ]
         )
 
-    assert mock_pull.call_args.kwargs["public_key"] == "pk-cli"
-    assert mock_pull.call_args.kwargs["secret_key"] == "sk-cli"
+    assert mock_pull.call_args.kwargs["public_key"] == "pk-env"
+    assert mock_pull.call_args.kwargs["secret_key"] == "sk-env"
 
 
-def test_main_pull_langfuse_base_url_from_env_file_resolves_with_cli_credential_flags(
+def test_main_pull_langfuse_base_url_from_env_file_resolves_with_env_credentials(
     tmp_path,
 ):
     # LANGFUSE_BASE_URL lives only in the selected --env-file, not the real
-    # process environment. Supplying credentials via CLI flags must not skip
-    # loading that file, or this value would never be seen.
+    # process environment. Credentials and endpoint must both load from it.
     env_file = tmp_path / ".env"
-    env_file.write_text("LANGFUSE_BASE_URL=https://env-file-host.example.com\n")
+    env_file.write_text(
+        "LANGFUSE_BASE_URL=https://env-file-host.example.com\n"
+        "LANGFUSE_PUBLIC_KEY=pk-env\nLANGFUSE_SECRET_KEY=sk-env\n"
+    )
 
     with patch(
         "metergraphrelay.cli.pull_langfuse", return_value=(0, 0)
@@ -196,10 +194,6 @@ def test_main_pull_langfuse_base_url_from_env_file_resolves_with_cli_credential_
                 "langfuse",
                 "--env-file",
                 str(env_file),
-                "--langfuse-public-key",
-                "pk-cli",
-                "--langfuse-secret-key",
-                "sk-cli",
                 "--until",
                 "2026-08-07T00:00:00+00:00",
             ]
@@ -636,10 +630,6 @@ def test_pull_langfuse_help_documents_every_flag_and_default(capsys):
         "./traces.jsonl",
         "--env-file",
         ".env",
-        "--langfuse-public-key",
-        "LANGFUSE_PUBLIC_KEY",
-        "--langfuse-secret-key",
-        "LANGFUSE_SECRET_KEY",
     ]:
         assert expected in help_text, f"missing {expected!r} in --help output"
 
@@ -1094,7 +1084,7 @@ def test_main_pull_braintrust_dispatches_to_pull_braintrust(tmp_path):
     )
 
 
-def test_main_pull_braintrust_credential_flag_overrides_env(tmp_path):
+def test_main_pull_braintrust_credential_is_loaded_from_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("BRAINTRUST_API_KEY=from-env\n")
 
@@ -1109,19 +1099,20 @@ def test_main_pull_braintrust_credential_flag_overrides_env(tmp_path):
                 "p",
                 "--env-file",
                 str(env_file),
-                "--braintrust-api-key",
-                "from-flag",
             ]
         )
 
-    assert mock_pull.call_args.kwargs["api_key"] == "from-flag"
+    assert mock_pull.call_args.kwargs["api_key"] == "from-env"
 
 
 def test_main_pull_braintrust_base_url_from_env_file_resolves_with_credential_flag(
     tmp_path,
 ):
     env_file = tmp_path / ".env"
-    env_file.write_text("BRAINTRUST_BASE_URL=https://api-eu.braintrust.dev\n")
+    env_file.write_text(
+        "BRAINTRUST_BASE_URL=https://api-eu.braintrust.dev\n"
+        "BRAINTRUST_API_KEY=bt-key\n"
+    )
 
     with patch(
         "metergraphrelay.cli.pull_braintrust", return_value=(0, 0)
@@ -1134,8 +1125,6 @@ def test_main_pull_braintrust_base_url_from_env_file_resolves_with_credential_fl
                 "p",
                 "--env-file",
                 str(env_file),
-                "--braintrust-api-key",
-                "bt-key",
             ]
         )
 
@@ -1273,8 +1262,6 @@ def test_pull_braintrust_help_documents_every_flag_and_default(capsys):
         "./traces.jsonl",
         "--env-file",
         ".env",
-        "--braintrust-api-key",
-        "BRAINTRUST_API_KEY",
     ]:
         assert expected in help_text, f"missing {expected!r} in --help output"
 
@@ -1388,7 +1375,7 @@ def test_main_pull_phoenix_reads_base_url_and_key_from_env_file(tmp_path):
     assert kwargs["count"] == 100
 
 
-def test_main_pull_phoenix_flags_take_precedence_over_env(tmp_path):
+def test_main_pull_phoenix_credentials_are_loaded_from_env(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "PHOENIX_BASE_URL=https://phoenix.example.com\nPHOENIX_API_KEY=px-env\n"
@@ -1405,8 +1392,6 @@ def test_main_pull_phoenix_flags_take_precedence_over_env(tmp_path):
                 "p",
                 "--base-url",
                 "http://127.0.0.1:7007",
-                "--phoenix-api-key",
-                "px-flag",
                 "--route",
                 "my-app/reply",
             ]
@@ -1414,7 +1399,7 @@ def test_main_pull_phoenix_flags_take_precedence_over_env(tmp_path):
 
     kwargs = mock_pull.call_args.kwargs
     assert kwargs["base_url"] == "http://127.0.0.1:7007"
-    assert kwargs["api_key"] == "px-flag"
+    assert kwargs["api_key"] == "px-env"
     assert kwargs["route"] == "my-app/reply"
 
 
@@ -1719,14 +1704,13 @@ def test_pull_langsmith_dispatches_with_env_endpoint_and_selectors(tmp_path, cap
         "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z", 7, "r")
 
 
-def test_pull_langsmith_defaults_to_the_us_host_and_flag_key_wins(tmp_path):
+def test_pull_langsmith_defaults_to_the_us_host_and_loads_env_key(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("LANGSMITH_API_KEY=ls-env\n")
     with patch("metergraphrelay.cli.pull_langsmith", return_value=(0, 0)) as pull:
-        main(["pull", "langsmith", "--env-file", str(env_file), "--project", "p",
-              "--langsmith-api-key", "ls-flag"])
+        main(["pull", "langsmith", "--env-file", str(env_file), "--project", "p"])
     assert pull.call_args.kwargs["base_url"] == "https://api.smith.langchain.com"
-    assert pull.call_args.kwargs["api_key"] == "ls-flag"
+    assert pull.call_args.kwargs["api_key"] == "ls-env"
 
 
 def test_pull_langsmith_reports_api_errors(tmp_path, capsys):

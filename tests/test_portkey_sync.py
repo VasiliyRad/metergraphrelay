@@ -338,6 +338,8 @@ def test_end_to_end_happy_path_creates_starts_downloads_normalizes_pushes_and_co
     assert {r["import_event_id"] for r in pushed_rows} == {"r1", "r2"}
     assert all(r["import_source"] == "portkey" for r in pushed_rows)
     assert all(r["import_source_scope"] == "ws-acme" for r in pushed_rows)
+    assert all(r["content_opted_in"] is False for r in pushed_rows)
+    assert all("request_json" not in r and "response_text" not in r for r in pushed_rows)
     assert pushes[0]["token"] == "tok-123"
     assert outcome.pushed == 2
 

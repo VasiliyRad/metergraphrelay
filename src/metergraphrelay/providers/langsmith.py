@@ -39,6 +39,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from .. import __version__
+from ..http_limits import ResponseTooLarge, read_bounded
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row
 from ..import_identity import ImportContext, canonical_import_event_id
@@ -49,6 +50,8 @@ RUNS_QUERY_PATH = "/runs/query"
 SESSIONS_PATH = "/sessions"
 # /runs/query serves at most 100 rows per page.
 PAGE_LIMIT = 100
+MAX_PAGES_PER_PULL = 10_000
+MAX_ITEMS_PER_PULL = 100_000
 LLM_RUN_TYPE = "llm"
 REQUEST_TIMEOUT_SECONDS = 30.0
 BACKFILL_ROUTE = "langsmith/backfill"
@@ -138,16 +141,18 @@ def _request(
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            raw = response.read()
+            raw = read_bounded(response)
     except urllib.error.HTTPError as exc:
         raise LangSmithAPIError(
             f"LangSmith API request failed: HTTP {exc.code} {exc.reason}"
         ) from exc
     except urllib.error.URLError as exc:
         raise LangSmithAPIError(f"LangSmith API request failed: {exc.reason}") from exc
+    except ResponseTooLarge as exc:
+        raise LangSmithAPIError(str(exc)) from exc
     try:
         return json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise LangSmithAPIError(f"LangSmith API returned invalid JSON: {exc}") from exc
 
 
@@ -529,6 +534,8 @@ def pull_langsmith(
     skipped = 0
     cursor: str | None = None
     used_cursors: set[str] = set()
+    page_count = 0
+    item_count = 0
 
     output_dir = os.path.dirname(output_path) or "."
     fd, tmp_path = tempfile.mkstemp(
@@ -537,6 +544,11 @@ def pull_langsmith(
     try:
         with os.fdopen(fd, "w") as f:
             while imported < count:
+                page_count += 1
+                if page_count > MAX_PAGES_PER_PULL:
+                    raise LangSmithAPIError(
+                        f"LangSmith pull exceeded the maximum of {MAX_PAGES_PER_PULL} pages"
+                    )
                 if cursor:
                     if cursor in used_cursors:
                         raise LangSmithAPIError(
@@ -554,6 +566,11 @@ def pull_langsmith(
                     on_progress()  # a page fetch is progress too
                 if not runs:
                     break
+                item_count += len(runs)
+                if item_count > MAX_ITEMS_PER_PULL:
+                    raise LangSmithAPIError(
+                        f"LangSmith pull exceeded the maximum of {MAX_ITEMS_PER_PULL} items"
+                    )
                 for run in runs:
                     if imported >= count:
                         break

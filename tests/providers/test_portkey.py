@@ -619,7 +619,7 @@ def test_sync_portkey_help_documents_prerequisites(capsys):
         "Portkey subscription",
         "log export",
         "never contacts Portkey",
-        "uploaded to MeterGraph",
+        "Scheduled imports omit request and response content unless --include-content is explicitly passed",
         "--output",
         "--env-file",
     ]:
