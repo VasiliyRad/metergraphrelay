@@ -57,7 +57,7 @@ def _client():
 
 def test_create_export_sends_filters_requested_data_and_api_key_header():
     body = json.dumps({"id": "exp-1", "total": 42, "object": "export"}).encode()
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, body)
         export = _client().create_export(window_start=W_MIN, window_end=W_MAX)
 
@@ -84,7 +84,7 @@ def test_create_export_sends_filters_requested_data_and_api_key_header():
 
 def test_create_export_omits_workspace_id_when_not_configured():
     body = json.dumps({"id": "exp-1", "total": 0, "object": "export"}).encode()
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, body)
         export = PortkeyExportClient("pk-secret", base_url=BASE).create_export(
             window_start=W_MIN, window_end=W_MAX
@@ -110,14 +110,14 @@ def test_create_export_omits_workspace_id_when_not_configured():
     ],
 )
 def test_create_export_rejects_invalid_id_or_total(payload):
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps(payload).encode())
         with pytest.raises(PortkeyExportError):
             _client().create_export(window_start=W_MIN, window_end=W_MAX)
 
 
 def test_start_export_posts_to_start_path():
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps({"message": "ok", "object": "export"}).encode())
         _client().start_export("exp-1")
     request = mock.call_args.args[0]
@@ -127,7 +127,7 @@ def test_start_export_posts_to_start_path():
 
 def test_get_export_reads_status_enum():
     body = json.dumps({"id": "exp-1", "status": "in_progress", "object": "export"}).encode()
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, body)
         export = _client().get_export("exp-1")
     request = mock.call_args.args[0]
@@ -139,7 +139,7 @@ def test_get_export_reads_status_enum():
 
 def test_get_export_defaults_id_to_argument_when_absent():
     body = json.dumps({"status": "success"}).encode()
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, body)
         export = _client().get_export("exp-1")
     assert export.export_id == "exp-1"
@@ -160,7 +160,7 @@ def test_get_export_defaults_id_to_argument_when_absent():
     ],
 )
 def test_get_export_rejects_invalid_status_or_id(payload):
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps(payload).encode())
         with pytest.raises(PortkeyExportError):
             _client().get_export("exp-1")
@@ -180,7 +180,7 @@ def test_export_terminal_and_success_flags(status, terminal, success):
 def test_download_to_resolves_signed_url_then_streams_without_portkey_header(tmp_path):
     payload = b'{"id":"r1"}\n{"id":"r2"}\n'
     dest = tmp_path / "raw.jsonl"
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = _signed_ok([payload])
         written = _client().download_to("exp-1", str(dest))
 
@@ -199,7 +199,7 @@ def test_download_to_streams_bounded_chunks_and_counts_split_lines(tmp_path):
     # must NOT be counted, and a final record with no trailing newline.
     chunks = [b'{"id":', b'"r1"}\n\n', b'{"id":"r2"}\n', b'   \n', b'{"id":"r3"}']
     stream = _stream_resp(200, chunks)
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = [
             _resp(200, json.dumps({"signed_url": SIGNED}).encode()),
             stream,
@@ -220,7 +220,7 @@ def test_download_to_invokes_progress_callback_at_bounded_cadence(tmp_path):
     dest = tmp_path / "raw.jsonl"
     chunks = [b'{"id":"r1"}\n', b'{"id":"r2"}\n', b'{"id":"r3"}\n']
     calls = []
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = [
             _resp(200, json.dumps({"signed_url": SIGNED}).encode()),
             _stream_resp(200, chunks),
@@ -232,7 +232,7 @@ def test_download_to_invokes_progress_callback_at_bounded_cadence(tmp_path):
 
 def test_download_to_without_callback_still_downloads(tmp_path):
     dest = tmp_path / "raw.jsonl"
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = _signed_ok([b'{"id":"r1"}\n'])
         assert _client().download_to("exp-1", str(dest)) == 1
     assert dest.read_bytes() == b'{"id":"r1"}\n'
@@ -249,7 +249,7 @@ def test_download_to_leaves_no_partial_file_on_midstream_failure(tmp_path):
         r.__exit__.return_value = False
         return r
 
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = [
             _resp(200, json.dumps({"signed_url": SIGNED}).encode()),
             failing_stream(),
@@ -266,7 +266,7 @@ def test_download_to_leaves_no_partial_file_on_midstream_failure(tmp_path):
     ["ftp://host/x", "file:///etc/passwd", "javascript:alert(1)", "http:///nohost", "notaurl", ""],
 )
 def test_download_to_rejects_non_http_signed_url(bad_url):
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps({"signed_url": bad_url}).encode())
         with pytest.raises(PortkeyExportError, match="signed_url"):
             _client().download_to("exp-1", "/tmp/whatever.jsonl")
@@ -276,14 +276,14 @@ def test_download_to_rejects_non_http_signed_url(bad_url):
 
 
 def test_download_to_raises_when_signed_url_missing():
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps({}).encode())
         with pytest.raises(PortkeyExportError, match="signed_url"):
             _client().download_to("exp-1", "/tmp/whatever.jsonl")
 
 
 def test_cancel_export_posts_to_cancel_path():
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps({"message": "cancelled", "object": "export"}).encode())
         _client().cancel_export("exp-1")
     request = mock.call_args.args[0]
@@ -293,7 +293,7 @@ def test_cancel_export_posts_to_cancel_path():
 
 def test_api_endpoint_unexpected_2xx_status_raises():
     # urlopen does not raise on 2xx; the client must reject any status other than 200.
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(202, json.dumps({"id": "exp-1", "total": 1}).encode())
         with pytest.raises(PortkeyExportError, match="202"):
             _client().create_export(window_start=W_MIN, window_end=W_MAX)
@@ -301,7 +301,7 @@ def test_api_endpoint_unexpected_2xx_status_raises():
 
 def test_signed_fetch_unexpected_status_raises_and_writes_nothing(tmp_path):
     dest = tmp_path / "raw.jsonl"
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = [
             _resp(200, json.dumps({"signed_url": SIGNED}).encode()),
             _stream_resp(206, [b'{"id":"r1"}\n']),
@@ -313,7 +313,7 @@ def test_signed_fetch_unexpected_status_raises_and_writes_nothing(tmp_path):
 
 
 def test_http_error_raises_portkey_export_error():
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = urllib.error.HTTPError(
             url=f"{BASE}/x", code=401, msg="Unauthorized", hdrs=None, fp=None
         )
@@ -322,7 +322,7 @@ def test_http_error_raises_portkey_export_error():
 
 
 def test_network_error_raises_portkey_export_error():
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = urllib.error.URLError("connection refused")
         with pytest.raises(PortkeyExportError, match="connection refused"):
             _client().get_export("exp-1")
@@ -344,7 +344,7 @@ def test_network_error_raises_portkey_export_error():
 def test_every_portkey_api_request_carries_package_user_agent(invoke, resp_body):
     # Cloudflare rejected the default Python-urllib UA with HTTP 403 code 1010;
     # every authed API request must send an explicit, package-derived User-Agent.
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, json.dumps(resp_body).encode())
         invoke(_client())
     assert mock.call_args_list  # a request was actually made
@@ -355,7 +355,7 @@ def test_every_portkey_api_request_carries_package_user_agent(invoke, resp_body)
 
 def test_download_requests_carry_user_agent_and_signed_url_omits_credential(tmp_path):
     dest = tmp_path / "raw.jsonl"
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.side_effect = _signed_ok([b'{"id":"r1"}\n'])
         _client().download_to("exp-1", str(dest))
 
@@ -371,7 +371,7 @@ def test_download_requests_carry_user_agent_and_signed_url_omits_credential(tmp_
 def test_create_export_body_includes_nonsensitive_description():
     # Portkey create-export returned AB01 until the body carried a `description`.
     body = json.dumps({"id": "exp-1", "total": 1}).encode()
-    with patch("metergraphrelay.providers.portkey_export.urllib.request.urlopen") as mock:
+    with patch("metergraphrelay.providers.portkey_export._OPENER.open") as mock:
         mock.return_value = _resp(200, body)
         _client().create_export(window_start=W_MIN, window_end=W_MAX)
 

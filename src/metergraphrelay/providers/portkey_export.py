@@ -49,6 +49,23 @@ _DOWNLOAD_CHUNK_SIZE = 1 << 16  # 64 KiB
 _MAX_DOWNLOAD_BYTES = 1 << 30  # 1 GiB hard ceiling for one signed export
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "redirects are not followed for Portkey endpoints",
+            headers,
+            fp,
+        )
+
+
+_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirects(),
+)
+
+
 class PortkeyExportError(Exception):
     """Raised when the Portkey Logs Export API errors or returns an unusable body."""
 
@@ -94,7 +111,7 @@ class PortkeyExportClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with _OPENER.open(request, timeout=self._timeout) as response:
                 self._check_status(response.status)
                 return read_bounded(response)
         except urllib.error.HTTPError as exc:
@@ -213,7 +230,7 @@ class PortkeyExportClient:
         )
         tmp_path = f"{dest_path}.part"
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with _OPENER.open(request, timeout=self._timeout) as response:
                 self._check_status(response.status)
                 with open(tmp_path, "wb") as dst:
                     lines = self._pump(response, dst, on_progress)
