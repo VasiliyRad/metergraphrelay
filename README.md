@@ -286,7 +286,7 @@ but LLM spans is ever imported, but `--name` has no effect there.
 
 **Setup:** nothing, for a local Phoenix. The default base URL is
 `http://localhost:6006`. For a remote or authenticated Phoenix, set these
-in `.env` (or pass `--base-url` / `--phoenix-api-key` per-command):
+in `.env` (and pass `--base-url` only when selecting a different endpoint):
 
     PHOENIX_BASE_URL=https://phoenix.example.com
     PHOENIX_API_KEY=...

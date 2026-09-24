@@ -37,6 +37,7 @@ import os
 import sys
 import tempfile
 import time
+import json
 from typing import Callable, Protocol
 
 from .metergraph_sync import LeaseLostError, MeterGraphSyncError
@@ -76,6 +77,7 @@ def run_pull_sync(
     ingest_base_url: str | None,
     provider_errors: tuple[type[Exception], ...] = (),
     allow_skipped: bool = False,
+    content_opted_in: bool = False,
     work_dir: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     renew_interval_seconds: float = RENEW_INTERVAL_SECONDS,
@@ -111,7 +113,11 @@ def run_pull_sync(
         )
 
     lease = acquire.lease
-    ctx = ImportContext(source=source, source_scope=source_scope)
+    ctx = ImportContext(
+        source=source,
+        source_scope=source_scope,
+        content_opted_in=content_opted_in,
+    )
 
     def renew() -> None:
         mg_client.renew(lease.lease_id)
@@ -130,6 +136,8 @@ def run_pull_sync(
                 import_context=ctx,
                 on_progress=renewer.tick,
             )
+            if not ctx.content_opted_in:
+                _make_content_blind(rows_path)
             renewer.force()  # pull done — force before the row-by-row upload
             if skipped and not allow_skipped:
                 # In sync mode there is no export file to recover a skipped row
@@ -202,6 +210,20 @@ def run_pull_sync(
         # because of a bug here.
         _safe_abandon(mg_client, lease)
         raise
+
+
+def _make_content_blind(path: str) -> None:
+    """Remove provider content before a scheduled import can upload it."""
+    temporary = f"{path}.content-blind"
+    with open(path, encoding="utf-8") as source, open(temporary, "w", encoding="utf-8") as target:
+        for line in source:
+            row = json.loads(line)
+            if isinstance(row, dict):
+                for field in ("request_json", "request_text", "response_text", "tool_calls"):
+                    row.pop(field, None)
+                row["content_opted_in"] = False
+            target.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(temporary, path)
 
 
 def _already_sent(phase: str, pushed: int) -> str:

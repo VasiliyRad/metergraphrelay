@@ -9,6 +9,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
+from ..http_limits import ResponseTooLarge, read_bounded
 from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
 
@@ -18,6 +19,8 @@ from ..window import normalize_utc_designator
 DEFAULT_BRAINTRUST_URL = "https://api.braintrust.dev"
 BTQL_PATH = "/btql"
 PAGE_LIMIT = 1000
+MAX_PAGES_PER_PULL = 10_000
+MAX_ITEMS_PER_PULL = 100_000
 # span_attributes.type is Braintrust's own span classifier ("llm", "score",
 # "function", "eval", "task", "tool", "review"). Only "llm" spans are model
 # calls; every other type is application/eval structure and is never imported.
@@ -152,7 +155,7 @@ def fetch_spans_page(
         with urllib.request.urlopen(
             request, timeout=REQUEST_TIMEOUT_SECONDS
         ) as response:
-            raw = response.read()
+            raw = read_bounded(response)
             cursor = _read_cursor(response.headers)
     except urllib.error.HTTPError as exc:
         raise BraintrustAPIError(
@@ -162,9 +165,11 @@ def fetch_spans_page(
         raise BraintrustAPIError(
             f"Braintrust API request failed: {exc.reason}"
         ) from exc
+    except ResponseTooLarge as exc:
+        raise BraintrustAPIError(str(exc)) from exc
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise BraintrustAPIError(
             f"Braintrust API returned invalid JSON: {exc}"
         ) from exc
@@ -563,6 +568,8 @@ def pull_braintrust(
     skipped = 0
     cursor: str | None = None
     used_cursors: set[str] = set()
+    page_count = 0
+    item_count = 0
     # The cursor is bound to the query that produced it, so every page must ask
     # for the same LIMIT — only the OFFSET clause changes between pages. The cap
     # on `count` is enforced while writing rows instead.
@@ -575,6 +582,11 @@ def pull_braintrust(
     try:
         with os.fdopen(fd, "w") as f:
             while imported < count:
+                page_count += 1
+                if page_count > MAX_PAGES_PER_PULL:
+                    raise BraintrustAPIError(
+                        f"Braintrust pull exceeded the maximum of {MAX_PAGES_PER_PULL} pages"
+                    )
                 if cursor is not None:
                     if cursor in used_cursors:
                         raise BraintrustAPIError(
@@ -597,6 +609,11 @@ def pull_braintrust(
                     on_progress()  # a page fetch is progress too
                 if not spans:
                     break
+                item_count += len(spans)
+                if item_count > MAX_ITEMS_PER_PULL:
+                    raise BraintrustAPIError(
+                        f"Braintrust pull exceeded the maximum of {MAX_ITEMS_PER_PULL} items"
+                    )
                 for span in spans:
                     if imported >= count:
                         break

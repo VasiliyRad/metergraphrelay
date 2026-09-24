@@ -26,6 +26,7 @@ boundaries force an unconditional renewal.
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import time
 from typing import Callable
@@ -74,6 +75,7 @@ def run_portkey_sync(
     max_poll_seconds: float = MAX_POLL_SECONDS,
     renew_interval_seconds: float = RENEW_INTERVAL_SECONDS,
     push: Callable[..., tuple[int, int]] = push_file,
+    content_opted_in: bool = False,
 ) -> SyncOutcome:
     # Acquire is the one step before a lease exists: any failure here (network error,
     # unknown status, or an "acquired" response with no lease) must NOT attempt an
@@ -104,7 +106,11 @@ def run_portkey_sync(
         )
 
     lease = acquire.lease
-    ctx = ImportContext(source=PORTKEY_SOURCE, source_scope=source_scope)
+    ctx = ImportContext(
+        source=PORTKEY_SOURCE,
+        source_scope=source_scope,
+        content_opted_in=content_opted_in,
+    )
     created_export_ids: list[str] = []  # every draft this run created, for best-effort cancel
 
     def renew() -> None:
@@ -137,6 +143,8 @@ def run_portkey_sync(
                 _, sk = convert_portkey_export(
                     raw, converted_path, import_context=ctx, on_progress=renewer.tick
                 )
+                if not content_opted_in:
+                    _make_content_blind(converted_path)
                 _discard_file(raw)  # raw fully consumed — free it before the upload
                 skipped += sk
                 renewer.force()  # normalize done — force before the row-by-row upload
@@ -225,6 +233,20 @@ def _plan_exports(pk_client, lease, created_export_ids: list[str], renewer) -> l
             )
         export_ids.append(draft.export_id)
     return export_ids
+
+
+def _make_content_blind(path: str) -> None:
+    """Remove request and response content before a scheduled upload."""
+    temporary = f"{path}.content-blind"
+    with open(path, encoding="utf-8") as source, open(temporary, "w", encoding="utf-8") as target:
+        for line in source:
+            row = json.loads(line)
+            if isinstance(row, dict):
+                for field in ("request_json", "request_text", "response_text", "tool_calls"):
+                    row.pop(field, None)
+                row["content_opted_in"] = False
+            target.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(temporary, path)
 
 
 def _poll_all(export_ids, pk_client, renewer, sleep, poll_interval, max_poll_seconds, clock) -> None:

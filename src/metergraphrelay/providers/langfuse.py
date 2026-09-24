@@ -11,11 +11,14 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
+from ..http_limits import ResponseTooLarge, read_bounded
 from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
 OBSERVATIONS_PATH = "/api/public/v2/observations"
 PAGE_LIMIT = 1000
+MAX_PAGES_PER_PULL = 10_000
+MAX_ITEMS_PER_PULL = 100_000
 GENERATION_TYPE = "GENERATION"
 # core+basic+time cover id/type/name/traceId/startTime/endTime/level/statusMessage/
 # parentObservationId/sessionId; io covers input/output; usage covers usageDetails
@@ -152,16 +155,18 @@ def fetch_observations_page(
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            body = response.read()
+            body = read_bounded(response)
     except urllib.error.HTTPError as exc:
         raise LangfuseAPIError(
             f"Langfuse API request failed: HTTP {exc.code} {exc.reason}"
         ) from exc
     except urllib.error.URLError as exc:
         raise LangfuseAPIError(f"Langfuse API request failed: {exc.reason}") from exc
+    except ResponseTooLarge as exc:
+        raise LangfuseAPIError(str(exc)) from exc
     try:
         payload = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise LangfuseAPIError(f"Langfuse API returned invalid JSON: {exc}") from exc
     data = payload.get("data") if isinstance(payload, dict) else None
     meta = payload.get("meta") if isinstance(payload, dict) else None
@@ -460,6 +465,8 @@ def pull_langfuse(
     skipped = 0
     cursor: str | None = None
     used_cursors: set[str] = set()
+    page_count = 0
+    item_count = 0
 
     output_dir = os.path.dirname(output_path) or "."
     fd, tmp_path = tempfile.mkstemp(
@@ -468,6 +475,11 @@ def pull_langfuse(
     try:
         with os.fdopen(fd, "w") as f:
             while imported < count:
+                page_count += 1
+                if page_count > MAX_PAGES_PER_PULL:
+                    raise LangfuseAPIError(
+                        f"Langfuse pull exceeded the maximum of {MAX_PAGES_PER_PULL} pages"
+                    )
                 page_params = dict(base_params)
                 page_params["limit"] = str(min(PAGE_LIMIT, count - imported))
                 if cursor:
@@ -490,6 +502,11 @@ def pull_langfuse(
                 observations = payload["data"]
                 if not observations:
                     break
+                item_count += len(observations)
+                if item_count > MAX_ITEMS_PER_PULL:
+                    raise LangfuseAPIError(
+                        f"Langfuse pull exceeded the maximum of {MAX_ITEMS_PER_PULL} items"
+                    )
                 for observation in observations:
                     if imported >= count:
                         break

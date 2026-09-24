@@ -28,6 +28,7 @@ class ImportIdentityError(ValueError):
 class ImportContext:
     source: str
     source_scope: str
+    content_opted_in: bool = False
 
 
 def canonical_import_event_id(raw: Any) -> str:

@@ -12,7 +12,7 @@ from openai import OpenAI
 from .config import ConfigError, require_credentials
 from .demo import run_demo
 from .metergraph_sync import MeterGraphSyncClient, MeterGraphSyncError
-from .portkey_sync import run_portkey_sync
+from .portkey_sync import _make_content_blind, run_portkey_sync
 from .provider_sync import UNBOUNDED_COUNT, run_pull_sync
 from .providers.braintrust import (
     DEFAULT_BRAINTRUST_URL,
@@ -159,24 +159,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=".env",
         help="Path to a .env file to load credentials from. (default: .env)",
     )
-    pull_langfuse_parser.add_argument(
-        "--langfuse-public-key",
-        default=None,
-        metavar="KEY",
-        help=(
-            "Langfuse public key (Basic Auth username). Overrides "
-            "$LANGFUSE_PUBLIC_KEY / .env if given; env/.env is the preferred path."
-        ),
-    )
-    pull_langfuse_parser.add_argument(
-        "--langfuse-secret-key",
-        default=None,
-        metavar="KEY",
-        help=(
-            "Langfuse secret key (Basic Auth password). Overrides "
-            "$LANGFUSE_SECRET_KEY / .env if given; env/.env is the preferred path."
-        ),
-    )
 
     pull_braintrust_parser = pull_subparsers.add_parser(
         "braintrust",
@@ -262,15 +244,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=".env",
         help="Path to a .env file to load credentials from. (default: .env)",
     )
-    pull_braintrust_parser.add_argument(
-        "--braintrust-api-key",
-        default=None,
-        metavar="KEY",
-        help=(
-            "Braintrust API key (Bearer token). Overrides $BRAINTRUST_API_KEY "
-            "/ .env if given; env/.env is the preferred path."
-        ),
-    )
 
     pull_langsmith_parser = pull_subparsers.add_parser(
         "langsmith",
@@ -349,13 +322,6 @@ def build_parser() -> argparse.ArgumentParser:
     pull_langsmith_parser.add_argument(
         "--env-file", default=".env",
         help="Path to a .env file to load credentials from. (default: .env)",
-    )
-    pull_langsmith_parser.add_argument(
-        "--langsmith-api-key", default=None, metavar="KEY",
-        help=(
-            "LangSmith API key. Overrides $LANGSMITH_API_KEY / .env if given; "
-            "env/.env is the preferred path."
-        ),
     )
 
     pull_phoenix_parser = pull_subparsers.add_parser(
@@ -451,16 +417,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=".env",
         help="Path to a .env file to load settings from. (default: .env)",
     )
-    pull_phoenix_parser.add_argument(
-        "--phoenix-api-key",
-        default=None,
-        metavar="KEY",
-        help=(
-            "Phoenix API key (Bearer token), only needed when the server has "
-            "authentication enabled. Overrides $PHOENIX_API_KEY / .env if "
-            "given. (default: none)"
-        ),
-    )
 
     sync_parser = subparsers.add_parser(
         "sync",
@@ -502,8 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
             "--initial-since seeds only the first run; --max-window-seconds "
             "caps the window at 3600. One Portkey workspace per metergraph app "
             "(MVP). A 'busy' lease or a 'caught up' server exit 0 as clean "
-            "no-ops. In both modes request and response content is uploaded to "
-            "MeterGraph with no opt-out."
+            "no-ops. Scheduled imports omit request and response content unless "
+            "--include-content is explicitly passed."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help=(
@@ -565,6 +521,11 @@ def build_parser() -> argparse.ArgumentParser:
             "(both modes) and PORTKEY_API_KEY (API mode). (default: .env)"
         ),
     )
+    sync_portkey_parser.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Include request and response content in the upload.",
+    )
 
     # --- sync langfuse / braintrust / phoenix: server-coordinated cron mode ---
     # One shape for the three cursor-paged providers. The server picks the
@@ -613,14 +574,6 @@ def build_parser() -> argparse.ArgumentParser:
             f"{DEFAULT_LANGFUSE_HOST})"
         ),
     )
-    sync_langfuse_parser.add_argument(
-        "--langfuse-public-key", default=None, metavar="KEY",
-        help="Langfuse public key. Overrides $LANGFUSE_PUBLIC_KEY / .env if given.",
-    )
-    sync_langfuse_parser.add_argument(
-        "--langfuse-secret-key", default=None, metavar="KEY",
-        help="Langfuse secret key. Overrides $LANGFUSE_SECRET_KEY / .env if given.",
-    )
 
     sync_braintrust_parser = sync_subparsers.add_parser(
         "braintrust",
@@ -652,10 +605,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Braintrust API base URL. (default: $BRAINTRUST_BASE_URL if set, "
             "else the US data plane)"
         ),
-    )
-    sync_braintrust_parser.add_argument(
-        "--braintrust-api-key", default=None, metavar="KEY",
-        help="Braintrust API key. Overrides $BRAINTRUST_API_KEY / .env if given.",
     )
 
     sync_phoenix_parser = sync_subparsers.add_parser(
@@ -692,13 +641,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Phoenix server base URL. (default: $PHOENIX_BASE_URL if set, else "
             f"{DEFAULT_PHOENIX_URL})"
-        ),
-    )
-    sync_phoenix_parser.add_argument(
-        "--phoenix-api-key", default=None, metavar="KEY",
-        help=(
-            "Phoenix API key, only when the server has authentication enabled. "
-            "Overrides $PHOENIX_API_KEY / .env if given."
         ),
     )
 
@@ -741,10 +683,6 @@ def build_parser() -> argparse.ArgumentParser:
             "LangSmith API base URL. (default: $LANGSMITH_ENDPOINT or "
             f"$LANGSMITH_BASE_URL if set, else {DEFAULT_LANGSMITH_URL})"
         ),
-    )
-    sync_langsmith_parser.add_argument(
-        "--langsmith-api-key", default=None, metavar="KEY",
-        help="LangSmith API key. Overrides $LANGSMITH_API_KEY / .env if given.",
     )
 
     demo_parser = subparsers.add_parser(
@@ -801,6 +739,11 @@ def _add_sync_common(parser: argparse.ArgumentParser, *, scope_help: str) -> Non
         default=".env",
         help="Path to a .env file to load credentials from. (default: .env)",
     )
+    parser.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Explicitly opt this scheduled import into prompt and completion content.",
+    )
 
 
 def _config_error(exc: ConfigError) -> int:
@@ -827,8 +770,6 @@ def _resolve_langfuse_credentials(args: argparse.Namespace) -> tuple[str, str]:
     # settings (e.g. LANGFUSE_BASE_URL) may still live only in that file, not
     # the real process environment, and must still resolve.
     load_dotenv(args.env_file, override=True)
-    if args.langfuse_public_key and args.langfuse_secret_key:
-        return args.langfuse_public_key, args.langfuse_secret_key
     creds = require_credentials("langfuse", args.env_file)
     return creds["LANGFUSE_PUBLIC_KEY"], creds["LANGFUSE_SECRET_KEY"]
 
@@ -839,8 +780,6 @@ def _resolve_braintrust_credential(args: argparse.Namespace) -> str:
     # BRAINTRUST_BASE_URL) may live only in that file, not the real process
     # environment, and must still resolve.
     load_dotenv(args.env_file, override=True)
-    if args.braintrust_api_key:
-        return args.braintrust_api_key
     return require_credentials("braintrust", args.env_file)["BRAINTRUST_API_KEY"]
 
 
@@ -855,8 +794,6 @@ def _resolve_langsmith_credential(args: argparse.Namespace) -> str:
     # Load the selected --env-file unconditionally, even when the flag is
     # given, so optional settings such as LANGSMITH_ENDPOINT are read too.
     load_dotenv(args.env_file, override=True)
-    if args.langsmith_api_key:
-        return args.langsmith_api_key
     return require_credentials("langsmith", args.env_file)["LANGSMITH_API_KEY"]
 
 
@@ -911,6 +848,8 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
 
     try:
         converted, skipped = convert_portkey_export(args.export_file, tmp_path)
+        if not args.include_content:
+            _make_content_blind(tmp_path)
     except (OSError, UnicodeDecodeError) as exc:
         _cleanup_temp_file(tmp_path)
         return _os_error(exc)
@@ -1016,6 +955,7 @@ def _run_sync_portkey_api(args: argparse.Namespace) -> int:
             max_window_seconds=max_window,
             push_token=push_creds["METERGRAPH_APP_TOKEN"],
             ingest_base_url=ingest_base,
+            content_opted_in=args.include_content,
         )
     except (MeterGraphSyncError, PortkeyExportError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1115,6 +1055,7 @@ def _run_sync_pull(args: argparse.Namespace, *, source: str, source_scope: str,
             ingest_base_url=ingest_base,
             provider_errors=provider_errors,
             allow_skipped=args.allow_skipped,
+            content_opted_in=args.include_content,
         )
     except (MeterGraphSyncError, OSError, *provider_errors) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1224,7 +1165,7 @@ def _run_sync_phoenix(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         return _config_error(exc)
     # require_credentials() has loaded the env file; optional settings follow.
-    api_key = args.phoenix_api_key or os.environ.get("PHOENIX_API_KEY") or None
+    api_key = os.environ.get("PHOENIX_API_KEY") or None
     base_url = (
         args.base_url or os.environ.get("PHOENIX_BASE_URL") or DEFAULT_PHOENIX_URL
     )
@@ -1316,7 +1257,7 @@ def _run_pull_phoenix(args: argparse.Namespace) -> int:
     # the .env file is loaded for its optional settings rather than through
     # require_credentials, which would fail on a missing key.
     load_dotenv(args.env_file, override=True)
-    api_key = args.phoenix_api_key or os.environ.get("PHOENIX_API_KEY") or None
+    api_key = os.environ.get("PHOENIX_API_KEY") or None
     base_url = (
         args.base_url or os.environ.get("PHOENIX_BASE_URL") or DEFAULT_PHOENIX_URL
     )

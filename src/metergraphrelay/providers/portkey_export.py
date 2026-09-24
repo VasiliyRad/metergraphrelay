@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .. import __version__
+from ..http_limits import ResponseTooLarge, read_bounded
 
 # Docs-verified Portkey beta Logs Export contract
 # (/api-reference/admin-api/data-plane/logs/log-exports-beta/).
@@ -45,6 +46,7 @@ _ALL_STATUSES = frozenset(
 # every _DOWNLOAD_CHUNK_SIZE bytes — a bounded cadence a caller can use to renew
 # a lease during a long download.
 _DOWNLOAD_CHUNK_SIZE = 1 << 16  # 64 KiB
+_MAX_DOWNLOAD_BYTES = 1 << 30  # 1 GiB hard ceiling for one signed export
 
 
 class PortkeyExportError(Exception):
@@ -94,13 +96,15 @@ class PortkeyExportClient:
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 self._check_status(response.status)
-                return response.read()
+                return read_bounded(response)
         except urllib.error.HTTPError as exc:
             raise PortkeyExportError(
                 f"Portkey export request failed: HTTP {exc.code} {exc.reason}"
             ) from exc
         except urllib.error.URLError as exc:
             raise PortkeyExportError(f"Portkey export request failed: {exc.reason}") from exc
+        except ResponseTooLarge as exc:
+            raise PortkeyExportError(str(exc)) from exc
 
     @staticmethod
     def _parse(raw: bytes) -> dict:
@@ -231,11 +235,17 @@ class PortkeyExportClient:
     def _pump(response, dst, on_progress: Callable[[], None] | None) -> int:
         """Stream response into dst, counting nonblank lines across chunk boundaries."""
         lines = 0
+        total_bytes = 0
         current_has_content = False  # does the line still being assembled hold any nonblank byte?
         while True:
             chunk = response.read(_DOWNLOAD_CHUNK_SIZE)
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_DOWNLOAD_BYTES:
+                raise PortkeyExportError(
+                    f"Portkey signed download exceeds the {_MAX_DOWNLOAD_BYTES}-byte limit"
+                )
             dst.write(chunk)
             segments = chunk.split(b"\n")
             for i, segment in enumerate(segments):

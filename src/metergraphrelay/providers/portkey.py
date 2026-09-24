@@ -319,7 +319,7 @@ def convert_portkey_export(
                 on_progress()
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError as exc:
+            except (json.JSONDecodeError, RecursionError) as exc:
                 skipped += 1
                 print(
                     f"Warning: skipping malformed row at line {line_number}: {exc}",
