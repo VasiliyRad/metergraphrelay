@@ -409,6 +409,12 @@ def _endpoint(response: dict) -> str | None:
         return "responses"
     if isinstance(response.get("choices"), list):
         return "chat.completions"
+    # Anthropic's Messages API answers with a top-level `type: message` and a
+    # `content` list rather than `choices`. Without this the call has no
+    # endpoint, the billing evidence never qualifies, and Portkey's cost for it
+    # is recorded but not used.
+    if response.get("type") == "message":
+        return "messages"
     return None
 
 
