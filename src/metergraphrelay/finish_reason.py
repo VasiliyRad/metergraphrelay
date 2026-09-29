@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 _MAX_REASON_LENGTH = 128
+# LangChain runs nest the reason as outputs.generations[[...]].generation_info
+# or .message.kwargs.response_metadata, six levels below the run.
+_MAX_DEPTH = 8
 _REASON_KEYS = ("stop_reason", "finish_reason", "finishReason")
 _REASON_CONTAINER_KEYS = (
     "incomplete_details",
@@ -15,6 +18,10 @@ _REASON_CONTAINER_KEYS = (
     "metadata",
     "invocation_params",
     "generations",
+    "generation_info",
+    "message",
+    "kwargs",
+    "response_metadata",
     "extra",
 )
 
@@ -41,7 +48,7 @@ def _reason_value(value: object) -> str | None:
 
 
 def _find_reason(value: object, *, depth: int = 0) -> str | None:
-    if depth > 4:
+    if depth > _MAX_DEPTH:
         return None
     if isinstance(value, (list, tuple)):
         for item in value:
