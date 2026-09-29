@@ -294,6 +294,15 @@ def test_normalize_span_reads_token_details_and_tool_names():
     assert row["tool_names"] == ["lookup_invoice", "refund"]
 
 
+def test_normalize_span_preserves_flattened_finish_reason():
+    attributes = {
+        "llm.output_messages.0.message.finish_reason": "length",
+    }
+    row = normalize_span(make_span(attributes=attributes), project="p", route_override=None)
+
+    assert row["stop_reason"] == "length"
+
+
 def test_normalize_span_normalizes_z_designator_and_tolerates_missing_end():
     span = make_span(start_time="2026-08-10T12:00:00Z", end_time=None)
     row = normalize_span(span, project="p", route_override=None)

@@ -322,6 +322,7 @@ def test_normalize_portkey_row_vertex_function_style_google_search():
         }
     ]
     assert result["tool_names"] == ["google_search"]
+    assert result["stop_reason"] == "tool_calls"
 
 
 def test_normalize_portkey_row_anthropic_native_tools():

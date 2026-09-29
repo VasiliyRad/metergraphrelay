@@ -320,6 +320,37 @@ def test_a_text_less_run_still_satisfies_the_capture_contract():
     assert_capture_contract(row)
 
 
+def test_normalize_run_preserves_stop_reason_from_extra_metadata():
+    row = normalize_run(
+        make_run(extra={"metadata": {"stop_reason": "max_tokens"}}),
+        route_override=None,
+    )
+
+    assert row["stop_reason"] == "max_tokens"
+
+
+def test_normalize_run_preserves_finish_reason_from_langchain_generations():
+    """LangChain chat models record the reason on each generation, not the run."""
+    openai_run = make_run(outputs={"generations": [[{
+        "text": "billing; P1",
+        "generation_info": {"finish_reason": "length"},
+    }]]})
+    anthropic_run = make_run(outputs={"generations": [[{
+        "text": "billing; P1",
+        "generation_info": None,
+        "message": {"kwargs": {"response_metadata": {"stop_reason": "max_tokens"}}},
+    }]]})
+
+    assert normalize_run(openai_run, route_override=None)["stop_reason"] == "length"
+    assert normalize_run(anthropic_run, route_override=None)["stop_reason"] == "max_tokens"
+
+
+def test_normalize_run_without_a_reason_leaves_stop_reason_unset():
+    row = normalize_run(make_run(), route_override=None)
+
+    assert "stop_reason" not in row
+
+
 def test_the_cost_langsmith_reported_is_named_as_its_own_figure():
     """LangSmith totals this from the tokens it observed, so it is an estimate
     rather than an amount a provider charged. Naming the source is what keeps an

@@ -42,6 +42,7 @@ from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row
+from ..finish_reason import extract_stop_reason
 from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
 
@@ -463,6 +464,7 @@ def normalize_run(
     usage = map_usage(run)
     request_json, request_text = _map_input(run.get("inputs"))
     run_id = run["id"]
+    stop_reason = extract_stop_reason(run)
 
     row = {
         "ts": _timestamp(run.get("start_time")),
@@ -493,6 +495,8 @@ def normalize_run(
         "span_id": run_id,
         "parent_span_id": run.get("parent_run_id"),
     }
+    if stop_reason is not None:
+        row["stop_reason"] = stop_reason
     if import_context is not None:
         # The run id is LangSmith's stable identity for the call, so an
         # overlap re-pull deduplicates on the server.

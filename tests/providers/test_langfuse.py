@@ -761,6 +761,15 @@ def test_normalize_observation_full_row():
     }
 
 
+def test_normalize_observation_preserves_finish_reason_from_output():
+    row = normalize_observation(
+        make_observation(output={"choices": [{"finish_reason": "length"}]}),
+        route_override=None,
+    )
+
+    assert row["stop_reason"] == "length"
+
+
 def test_normalize_observation_route_override_preserves_name_in_tags():
     observation = make_observation(tags=[])
 

@@ -12,6 +12,7 @@ from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row, capture_tool_calls
+from ..finish_reason import extract_stop_reason
 from ..import_identity import ImportContext, canonical_import_event_id
 from ..window import normalize_utc_designator
 
@@ -489,6 +490,7 @@ def normalize_span(
     usage = map_metrics(metrics)
     request_json, request_text = _map_content(span.get("input"))
     response_text, tool_calls = _extract_output(span.get("output"))
+    stop_reason = extract_stop_reason(span)
 
     span_parents = span.get("span_parents")
     parent_span_id = (
@@ -535,6 +537,8 @@ def normalize_span(
         "span_id": span.get("span_id") or span["id"],
         "parent_span_id": parent_span_id,
     }
+    if stop_reason is not None:
+        row["stop_reason"] = stop_reason
     if import_context is not None:
         # The row id is Braintrust's stable identity for this span, so an
         # overlap re-pull deduplicates on the server instead of double counting.

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from .. import __version__
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_row, capture_text, capture_tool_calls
+from ..finish_reason import extract_stop_reason
 
 
 # Shared with the other sync providers; re-exported here for existing imports.
@@ -459,6 +460,7 @@ def normalize_portkey_row(
 
     response_text, tool_calls = _extract_response(response)
     tool_names = _tool_names(tool_calls)
+    stop_reason = extract_stop_reason(response)
 
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     workflow_name = metadata.get("workflow_name")
@@ -502,6 +504,8 @@ def normalize_portkey_row(
         "sdk_version": __version__,
         "content_opted_in": True,
     }
+    if stop_reason is not None:
+        result["stop_reason"] = stop_reason
     result.update(_usage_detail(response))
     if import_context is not None:
         result["import_source"] = import_context.source
