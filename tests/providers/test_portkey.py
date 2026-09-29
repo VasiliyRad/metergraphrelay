@@ -341,6 +341,18 @@ def test_normalize_portkey_row_anthropic_native_tools():
     assert result["tool_names"] == ["get_weather"]
 
 
+def test_normalize_portkey_row_anthropic_messages_names_its_endpoint():
+    """The Messages API shape has no `choices` and no `object`, so it used to
+    leave `endpoint` unset; billing then never qualified Portkey's cost for any
+    Anthropic call, and a model the catalog did not know was stored at $0."""
+    result = normalize_portkey_row(_anthropic_row())
+
+    assert result["endpoint"] == "messages"
+    assert result["gateway"] == "portkey"
+    assert result["reported_cost_source"] == "portkey.cost"
+    assert Decimal(result["reported_cost_usd"]) == Decimal("0.08")
+
+
 def test_normalize_portkey_row_chat_completions_with_function_tool_calls():
     row = _chat_completion_row(
         ai_org="openai",
