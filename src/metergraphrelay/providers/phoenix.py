@@ -36,6 +36,7 @@ from typing import Any, Callable
 from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
 from ..capture_contract import capture_response_text, capture_row
+from ..finish_reason import extract_phoenix_stop_reason
 from ..window import normalize_utc_designator
 from ..import_identity import ImportContext, canonical_import_event_id
 
@@ -360,6 +361,7 @@ def normalize_span(
     )
 
     request_json, request_text = _map_input(attributes)
+    stop_reason = extract_phoenix_stop_reason(attributes)
     context = span.get("context")
     context = context if isinstance(context, dict) else {}
     span_id = context.get("span_id") or span["id"]
@@ -395,6 +397,8 @@ def normalize_span(
         "span_id": span_id,
         "parent_span_id": span.get("parent_id"),
     }
+    if stop_reason is not None:
+        row["stop_reason"] = stop_reason
     if import_context is not None:
         # The OpenTelemetry span id is stable across re-reads of the same
         # span, so an overlap re-pull deduplicates on the server.

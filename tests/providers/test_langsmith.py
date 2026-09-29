@@ -320,6 +320,15 @@ def test_a_text_less_run_still_satisfies_the_capture_contract():
     assert_capture_contract(row)
 
 
+def test_normalize_run_preserves_stop_reason_from_extra_metadata():
+    row = normalize_run(
+        make_run(extra={"metadata": {"stop_reason": "max_tokens"}}),
+        route_override=None,
+    )
+
+    assert row["stop_reason"] == "max_tokens"
+
+
 def test_the_cost_langsmith_reported_is_named_as_its_own_figure():
     """LangSmith totals this from the tokens it observed, so it is an estimate
     rather than an amount a provider charged. Naming the source is what keeps an

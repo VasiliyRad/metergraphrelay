@@ -894,6 +894,15 @@ def test_a_text_less_reply_still_satisfies_the_capture_contract():
     assert_capture_contract(row)
 
 
+def test_normalize_span_preserves_stop_reason_from_output():
+    row = normalize_span(
+        make_span(output={"role": "assistant", "content": "hello", "stop_reason": "length"}),
+        route_override=None,
+    )
+
+    assert row["stop_reason"] == "length"
+
+
 def test_the_cost_braintrust_estimated_is_named_as_an_estimate():
     """Braintrust computes this from the tokens it observed against its own
     price table -- the field is called `estimated_cost`. Naming the source keeps

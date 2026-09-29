@@ -14,6 +14,7 @@ from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row
+from ..finish_reason import extract_stop_reason
 from ..import_identity import ImportContext, canonical_import_event_id
 
 DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com"
@@ -431,6 +432,7 @@ def normalize_observation(
     response_text = _response_text(observation.get("output"))
 
     model = _resolve_model_name(observation)
+    stop_reason = extract_stop_reason(observation)
 
     row = {
         "ts": observation["startTime"],
@@ -462,6 +464,8 @@ def normalize_observation(
         "session_id": observation.get("sessionId"),
         "environment": observation.get("environment"),
     }
+    if stop_reason is not None:
+        row["stop_reason"] = stop_reason
     if import_context is not None:
         # The observation id is Langfuse's stable identity for this generation,
         # so an overlap re-pull deduplicates on the server instead of double
