@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any, Callable
 
 from .. import __version__
+from .cache_shape import CACHE_EXCLUSIVE_INPUT_PROVIDERS
 from ..http_limits import ResponseTooLarge, read_bounded
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_response_text, capture_row
@@ -313,9 +314,7 @@ _NON_BUCKET_MARKERS = ("priority",)
 #
 # For OpenAI and Google the opposite is true: their own totals include the
 # cached tokens, so the buckets Langfuse subtracted do have to be added back.
-_CACHE_EXCLUSIVE_INPUT_PROVIDERS = frozenset(
-    {"anthropic", "bedrock", "aws-bedrock", "aws", "amazon-bedrock"}
-)
+_CACHE_EXCLUSIVE_INPUT_PROVIDERS = CACHE_EXCLUSIVE_INPUT_PROVIDERS
 
 
 def _is_int(value: Any) -> bool:

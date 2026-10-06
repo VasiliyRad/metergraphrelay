@@ -1223,3 +1223,56 @@ def test_a_malformed_cost_does_not_abort_the_export_window(tmp_path):
     assert (converted, skipped) == (3, 0)
     costs = [json.loads(line)["cost_usd"] for line in output_path.read_text().splitlines()]
     assert costs == ["0.7272", None, "1939.4766285"]
+
+
+def _anthropic_cache_row(usage, *, req_units):
+    row = _responses_row(ai_org="anthropic", ai_model="claude-opus-5-5", req_units=req_units)
+    row["response"] = {"type": "message", "usage": usage}
+    return row
+
+
+def test_anthropic_input_is_reported_without_the_cache_buckets():
+    """Portkey's req_units is the whole prompt; Anthropic bills input without
+    the cached tokens it lists separately, and so does the catalog."""
+    row = _anthropic_cache_row(
+        {"input_tokens": 100, "output_tokens": 40, "cache_read_input_tokens": 70, "cache_creation_input_tokens": 30},
+        req_units=200,
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["input_tokens"] == 100
+    assert result["cache_read_tokens"] == 70
+    assert result["cache_write_tokens"] == 30
+
+
+def test_anthropic_cache_buckets_come_off_the_total_when_usage_has_no_input_count():
+    row = _anthropic_cache_row(
+        {"cache_read_input_tokens": 70, "cache_creation_input_tokens": 30}, req_units=200
+    )
+
+    assert normalize_portkey_row(row)["input_tokens"] == 100
+
+
+def test_anthropic_input_is_untouched_without_cache_tokens():
+    row = _anthropic_cache_row({"input_tokens": 100, "output_tokens": 40}, req_units=100)
+
+    assert normalize_portkey_row(row)["input_tokens"] == 100
+
+
+def test_openai_input_keeps_portkeys_total_which_includes_cached_tokens():
+    row = _usage_row(
+        {"input_tokens": 100, "output_tokens": 40, "input_tokens_details": {"cached_tokens": 60}}
+    )
+
+    result = normalize_portkey_row(row)
+
+    assert result["input_tokens"] == 100
+    assert result["cache_read_tokens"] == 60
+
+
+def test_a_claude_model_on_another_provider_keeps_anthropic_accounting():
+    row = _responses_row(ai_org="vertex-ai", ai_model="claude-sonnet-5-5", req_units=200)
+    row["response"] = {"type": "message", "usage": {"input_tokens": 100, "cache_read_input_tokens": 100}}
+
+    assert normalize_portkey_row(row)["input_tokens"] == 100
