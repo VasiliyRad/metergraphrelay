@@ -128,6 +128,30 @@ so `status` is always `"success"`. `error`/`error_type` flag a *partial*
 record: `--include-content` was requested but the follow-up message fetch
 failed, so token counts are still real while the content is missing.
 
+### Token counts follow the publisher
+
+A record carries token counts the way the model's publisher bills them, and
+the metergraph catalog applies that publisher's arithmetic. Providers do not
+agree on what `input_tokens` contains:
+
+| Publisher | `input_tokens` contains cached tokens? | Cache buckets |
+| --- | --- | --- |
+| OpenAI, Google, DeepSeek, xAI | Yes, as a total | `cache_read_tokens` is a subset of input |
+| Anthropic, Bedrock | No | `cache_read_tokens` and `cache_write_tokens` are separate buckets, added to input |
+
+Gateways and tracing tools reshape these. Portkey's `req_units` is a total
+for every provider; Vercel's gateway reports totals; Langfuse subtracts the
+buckets for every provider. A relay adapter converts whatever shape it
+receives back into the publisher's shape, using the provider's own usage
+block where the source passes it through. Keeping a gateway's total for an
+Anthropic call bills every cached token twice, once in input and once at the
+cache rate; folding Langfuse's buckets into an OpenAI total does the same.
+The gateway's own amount, where it reports one, is kept separately as
+`reported_cost_usd`, so nothing the gateway said is lost.
+
+`providers/cache_shape.py` names the publishers that count without the cache
+buckets; add a provider there, not in an adapter.
+
 ## Pull from Langfuse
 
 Import Langfuse **GENERATION** observations (the LLM call records
