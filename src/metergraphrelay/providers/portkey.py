@@ -13,6 +13,7 @@ from .. import __version__
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_row, capture_text, capture_tool_calls
 from ..finish_reason import extract_stop_reason
+from .cache_shape import reports_input_without_cache
 
 
 # Shared with the other sync providers; re-exported here for existing imports.
@@ -365,6 +366,32 @@ def _usage_detail(response: dict) -> dict[str, Any]:
     return detail
 
 
+def _exclude_cache_from_input(result: dict, response: dict) -> None:
+    """Report Anthropic input the way Anthropic bills it.
+
+    Portkey's `req_units` is the whole prompt, cache reads and writes included,
+    for every provider. Anthropic's own usage lists input without them, and
+    the catalog prices Anthropic that way, so a row that keeps `req_units`
+    bills every cached token twice: once at the input rate and once at the
+    cache rate. The provider's own `input_tokens` is used where the usage
+    block carries it; otherwise the cache buckets come off the total.
+    """
+    if not reports_input_without_cache(result.get("provider"), result.get("model")):
+        return
+    cache_read = result.get("cache_read_tokens") or 0
+    cache_write = result.get("cache_write_tokens") or 0
+    if not (cache_read or cache_write):
+        return
+    usage = response.get("usage")
+    native = usage.get("input_tokens") if isinstance(usage, dict) else None
+    if _is_int(native):
+        result["input_tokens"] = native
+        return
+    total = result.get("input_tokens")
+    if _is_int(total):
+        result["input_tokens"] = max(0, total - cache_read - cache_write)
+
+
 def _web_search_calls(response: dict) -> int | None:
     """How many searches the model ran, for providers that bill per search.
 
@@ -513,6 +540,7 @@ def normalize_portkey_row(
     if stop_reason is not None:
         result["stop_reason"] = stop_reason
     result.update(_usage_detail(response))
+    _exclude_cache_from_input(result, response)
     if import_context is not None:
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope
