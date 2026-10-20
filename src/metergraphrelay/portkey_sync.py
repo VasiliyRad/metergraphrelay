@@ -77,6 +77,7 @@ def run_portkey_sync(
     renew_interval_seconds: float = RENEW_INTERVAL_SECONDS,
     push: Callable[..., tuple[int, int]] = push_file,
     content_opted_in: bool = False,
+    environment: str | None = None,
 ) -> SyncOutcome:
     # Acquire is the one step before a lease exists: any failure here (network error,
     # unknown status, or an "acquired" response with no lease) must NOT attempt an
@@ -142,7 +143,8 @@ def run_portkey_sync(
                 pk_client.download_to(export_id, raw, on_progress=renewer.tick)
                 renewer.force()  # download done — force before normalize
                 _, sk = convert_portkey_export(
-                    raw, converted_path, import_context=ctx, on_progress=renewer.tick
+                    raw, converted_path, import_context=ctx, on_progress=renewer.tick,
+                    environment=environment,
                 )
                 if not content_opted_in:
                     _make_content_blind(converted_path)

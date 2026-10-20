@@ -813,6 +813,60 @@ def test_sync_portkey_api_flag_overrides_env_source_scope(tmp_path):
     assert run.call_args.kwargs["source_scope"] == "ws-flag"
 
 
+def _sync_portkey_api_kwargs(tmp_path, env_lines, *extra):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n" + env_lines)
+    with patch(
+        "metergraphrelay.cli.run_portkey_sync",
+        return_value=SyncOutcome("completed", "done", 0),
+    ) as run:
+        exit_code = main(
+            ["sync", "portkey", "--source-scope", "ws-acme", "--env-file", str(env_file), *extra]
+        )
+    return exit_code, run
+
+
+def test_sync_portkey_api_records_no_environment_by_default(tmp_path):
+    exit_code, run = _sync_portkey_api_kwargs(tmp_path, "")
+    assert exit_code == 0
+    assert run.call_args.kwargs["environment"] is None
+
+
+def test_sync_portkey_api_environment_from_env(tmp_path):
+    exit_code, run = _sync_portkey_api_kwargs(tmp_path, "PORTKEY_ENVIRONMENT=production\n")
+    assert exit_code == 0
+    assert run.call_args.kwargs["environment"] == "production"
+
+
+def test_sync_portkey_api_environment_flag_overrides_env_and_is_trimmed(tmp_path):
+    exit_code, run = _sync_portkey_api_kwargs(
+        tmp_path, "PORTKEY_ENVIRONMENT=production\n", "--environment", "  staging "
+    )
+    assert exit_code == 0
+    assert run.call_args.kwargs["environment"] == "staging"
+
+
+@pytest.mark.parametrize("value", ["", "   ", "x" * 129])
+def test_sync_portkey_api_rejects_an_unusable_environment(tmp_path, capsys, value):
+    exit_code, run = _sync_portkey_api_kwargs(tmp_path, "", "--environment", value)
+    assert exit_code == 1
+    run.assert_not_called()
+    assert "--environment / PORTKEY_ENVIRONMENT must be 1 to 128 characters" in capsys.readouterr().err
+
+
+def test_sync_portkey_manual_mode_records_the_environment(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("METERGRAPH_APP_TOKEN=tok-123\nPORTKEY_ENVIRONMENT=production\n")
+    export_file = tmp_path / "export.jsonl"
+    export_file.write_text("")
+
+    with patch("metergraphrelay.cli.convert_portkey_export", return_value=(0, 0)) as convert:
+        exit_code = main(["sync", "portkey", str(export_file), "--env-file", str(env_file)])
+
+    assert exit_code == 0
+    assert convert.call_args.kwargs["environment"] == "production"
+
+
 def test_sync_portkey_api_passes_initial_since_and_max_window(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("PORTKEY_API_KEY=pk-1\nMETERGRAPH_APP_TOKEN=tok-123\n")
