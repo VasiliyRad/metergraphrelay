@@ -718,6 +718,33 @@ def test_normalize_portkey_row_with_import_context_adds_dedup_fields():
     assert result["import_event_id"] == result["request_id"]
 
 
+def test_normalize_portkey_row_records_a_given_environment():
+    result = normalize_portkey_row(_responses_row(), environment="production")
+    assert result["environment"] == "production"
+
+
+def test_normalize_portkey_row_invents_no_environment():
+    # Portkey's export has no environment field, so none is made up.
+    assert "environment" not in normalize_portkey_row(_responses_row())
+
+
+def test_convert_portkey_export_records_the_environment_on_every_row(tmp_path):
+    input_path = tmp_path / "raw.jsonl"
+    input_path.write_text(
+        json.dumps(_responses_row(id="row-1", trace_id="t-1")) + "\n"
+        + json.dumps(_chat_completion_row(id="row-2", trace_id="t-2")) + "\n"
+    )
+    output_path = tmp_path / "converted.jsonl"
+
+    converted, skipped = convert_portkey_export(
+        str(input_path), str(output_path), environment="production"
+    )
+
+    assert (converted, skipped) == (2, 0)
+    rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+    assert [r["environment"] for r in rows] == ["production", "production"]
+
+
 def test_convert_portkey_export_threads_import_context_into_every_row(tmp_path):
     ctx = ImportContext(source="portkey", source_scope="ws-acme")
     input_path = tmp_path / "raw.jsonl"

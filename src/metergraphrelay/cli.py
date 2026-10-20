@@ -28,6 +28,9 @@ from .providers.portkey_export import PortkeyExportClient, PortkeyExportError
 from .push import DEFAULT_INGEST_URL, push_file
 from .window import normalize_utc_designator
 
+# The longest environment metergraph accepts in an environment filter.
+MAX_ENVIRONMENT_LENGTH = 128
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -459,7 +462,12 @@ def build_parser() -> argparse.ArgumentParser:
             "caps the window at 3600. One Portkey workspace per metergraph app "
             "(MVP). A 'busy' lease or a 'caught up' server exit 0 as clean "
             "no-ops. Scheduled imports omit request and response content unless "
-            "--include-content is explicitly passed."
+            "--include-content is explicitly passed.\n"
+            "\n"
+            "Portkey exports carry no environment. When a Portkey workspace "
+            "serves one deployment environment, --environment (or "
+            "$PORTKEY_ENVIRONMENT) records it on every imported call, in "
+            "either mode."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help=(
@@ -525,6 +533,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-content",
         action="store_true",
         help="Include request and response content in the upload.",
+    )
+    sync_portkey_parser.add_argument(
+        "--environment",
+        default=None,
+        help=(
+            "Environment to record on every imported call, such as "
+            "'production' (both modes; falls back to $PORTKEY_ENVIRONMENT). "
+            f"At most {MAX_ENVIRONMENT_LENGTH} characters. (default: none)"
+        ),
     )
 
     # --- sync langfuse / braintrust / phoenix: server-coordinated cron mode ---
@@ -808,6 +825,26 @@ def _langsmith_base_url(args: argparse.Namespace) -> str:
     )
 
 
+def _portkey_environment(args: argparse.Namespace) -> str | None:
+    """The environment to record on imported Portkey calls, or None.
+
+    Read after the env file is loaded, so $PORTKEY_ENVIRONMENT may come from it.
+    Not a secret, so echoing a bad value is safe.
+    """
+    value = args.environment
+    if value is None:
+        value = os.environ.get("PORTKEY_ENVIRONMENT")
+    if value is None:
+        return None
+    environment = value.strip()
+    if not environment or len(environment) > MAX_ENVIRONMENT_LENGTH or "\x00" in environment:
+        raise ConfigError(
+            "--environment / PORTKEY_ENVIRONMENT must be 1 to "
+            f"{MAX_ENVIRONMENT_LENGTH} characters, got {value!r}."
+        )
+    return environment
+
+
 def _run_sync_portkey(args: argparse.Namespace) -> int:
     # A local EXPORT_FILE selects manual mode, which never contacts Portkey, so the
     # API-cron-only flags have no effect here. Reject them up front (before touching
@@ -831,6 +868,7 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
         return 1
     try:
         push_creds = require_credentials("push", args.env_file)
+        environment = _portkey_environment(args)
     except ConfigError as exc:
         return _config_error(exc)
 
@@ -847,7 +885,9 @@ def _run_sync_portkey(args: argparse.Namespace) -> int:
         return _os_error(exc)
 
     try:
-        converted, skipped = convert_portkey_export(args.export_file, tmp_path)
+        converted, skipped = convert_portkey_export(
+            args.export_file, tmp_path, environment=environment
+        )
         if not args.include_content:
             _make_content_blind(tmp_path)
     except (OSError, UnicodeDecodeError) as exc:
@@ -916,6 +956,7 @@ def _run_sync_portkey_api(args: argparse.Namespace) -> int:
     try:
         portkey_creds = require_credentials("portkey", args.env_file)
         push_creds = require_credentials("push", args.env_file)
+        environment = _portkey_environment(args)
     except ConfigError as exc:
         return _config_error(exc)
     # require_credentials() has now loaded the env file; non-secret config can be read.
@@ -956,6 +997,7 @@ def _run_sync_portkey_api(args: argparse.Namespace) -> int:
             push_token=push_creds["METERGRAPH_APP_TOKEN"],
             ingest_base_url=ingest_base,
             content_opted_in=args.include_content,
+            environment=environment,
         )
     except (MeterGraphSyncError, PortkeyExportError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

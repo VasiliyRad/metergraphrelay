@@ -344,6 +344,27 @@ def test_end_to_end_happy_path_creates_starts_downloads_normalizes_pushes_and_co
     assert outcome.pushed == 2
 
 
+def test_a_given_environment_is_recorded_on_every_pushed_row():
+    pk = FakePortkey({(WINDOW_START, WINDOW_END): [_portkey_row("r1"), _portkey_row("r2")]})
+    mg = FakeMeterGraph(_acquired())
+    pushes = []
+
+    outcome = _run(mg, pk, pushes, environment="production")
+
+    assert outcome.status == "completed"
+    assert [r["environment"] for p in pushes for r in p["rows"]] == ["production"] * 2
+
+
+def test_without_an_environment_pushed_rows_carry_none():
+    pk = FakePortkey({(WINDOW_START, WINDOW_END): [_portkey_row("r1")]})
+    mg = FakeMeterGraph(_acquired())
+    pushes = []
+
+    _run(mg, pk, pushes)
+
+    assert all("environment" not in r for p in pushes for r in p["rows"])
+
+
 # -- volume split ----------------------------------------------------------
 
 

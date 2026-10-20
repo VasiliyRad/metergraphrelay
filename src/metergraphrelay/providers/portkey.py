@@ -466,8 +466,17 @@ def _grounding_queries(response: dict) -> int | None:
 
 
 def normalize_portkey_row(
-    row: dict, *, import_context: ImportContext | None = None
+    row: dict,
+    *,
+    import_context: ImportContext | None = None,
+    environment: str | None = None,
 ) -> dict:
+    """Map one Portkey log row to a metergraph-native call.
+
+    Portkey's export carries no environment of its own, so ``environment``,
+    when given, is recorded on the call as is. It suits a Portkey workspace
+    that serves a single deployment environment.
+    """
     import_event_id = None
     if import_context is not None:
         # Validate the imported id before anything else so a bad id fails the
@@ -539,6 +548,8 @@ def normalize_portkey_row(
     }
     if stop_reason is not None:
         result["stop_reason"] = stop_reason
+    if environment is not None:
+        result["environment"] = environment
     result.update(_usage_detail(response))
     _exclude_cache_from_input(result, response)
     if import_context is not None:
@@ -554,8 +565,12 @@ def convert_portkey_export(
     *,
     import_context: ImportContext | None = None,
     on_progress: Callable[[], None] | None = None,
+    environment: str | None = None,
 ) -> tuple[int, int]:
     """Normalize a Portkey export JSONL to MeterGraph rows, returning (converted, skipped).
+
+    ``environment``, if given, is recorded on every converted row (see
+    ``normalize_portkey_row``).
 
     ``on_progress``, if given, is invoked once per processed (non-blank) line —
     converted or skipped — so a caller can renew a lease during a long
@@ -582,7 +597,9 @@ def convert_portkey_export(
                 )
                 continue
             try:
-                normalized = normalize_portkey_row(row, import_context=import_context)
+                normalized = normalize_portkey_row(
+                    row, import_context=import_context, environment=environment
+                )
                 serialized = json.dumps(normalized)
             except (KeyError, TypeError, AttributeError) as exc:
                 skipped += 1

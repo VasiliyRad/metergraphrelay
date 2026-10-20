@@ -17,6 +17,7 @@ ENV_VARS_READ_BY_CLI = sorted(
         "LANGSMITH_ENDPOINT",
         "PORTKEY_WORKSPACE",
         "PORTKEY_BASE_URL",
+        "PORTKEY_ENVIRONMENT",
     }
 )
 

@@ -497,6 +497,14 @@ workspace per metergraph app for this MVP.
 
     # PORTKEY_WORKSPACE=ws-your-workspace-id
 
+Portkey's export has no environment field, so imported calls arrive without
+one. If the workspace serves a single deployment environment, name it with
+`--environment` (or `$PORTKEY_ENVIRONMENT`) and every imported call records
+it, which makes metergraph's environment filters useful for this traffic.
+Manual mode accepts the same flag.
+
+    # PORTKEY_ENVIRONMENT=production
+
 Two optional env vars override endpoints. `PORTKEY_BASE_URL` points at a
 self-hosted Portkey — include the `/v1` API-version prefix, matching the
 default public base `https://api.portkey.ai/v1`; `METERGRAPH_INGEST_URL`
