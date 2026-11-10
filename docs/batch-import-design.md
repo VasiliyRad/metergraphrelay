@@ -36,7 +36,8 @@ checks shapes and expected counts, preserves recoverability, reprices via the sa
 worker/catalog path, repairs identities, and queues and drains changed analytics
 hours. It must refuse ambiguous or incomplete data and be idempotent on retry.
 Repair may use matching creation requests already stored privately; public fixtures
-and source contain synthetic data only. No schema expansion is planned.
+and source contain synthetic data only. The hosted repair must preserve its
+original records transactionally under tenant isolation and tenant-purge rules.
 
 ## Validation
 
