@@ -65,8 +65,11 @@ def expand_batch(row: dict, *, batch_requests: dict | None = None) -> list[dict]
     envelope = isinstance(response, dict) and 'custom_id' in response and 'result' in response
     if not envelope and not _RESULTS.fullmatch(model):
         return None
-    if not isinstance(row.get('response_status_code'), int) or row['response_status_code'] >= 400:
-        raise BatchShapeError('Anthropic batch results download failed')
+    status = row.get('response_status_code')
+    if type(status) is not int or not 200 <= status < 300:
+        # A failed/not-ready fetch is batch transport, just like status polls.
+        # Only a successful response can claim to contain inference results.
+        return []
 
     expanded = []
     seen = set()

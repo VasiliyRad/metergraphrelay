@@ -184,6 +184,29 @@ def _run(mg, pk, pushes, **overrides):
 # -- _LeaseRenewer: time-based renewal policy ------------------------------
 
 
+@pytest.mark.parametrize('status', [None, 404, 429, 500])
+def test_failed_batch_results_fetch_does_not_block_checkpoint(status):
+    mg, pushes = FakeMeterGraph(_acquired()), []
+    pending = {**_portkey_row('not-ready'), 'ai_org': 'anthropic',
+               'ai_model': 'anthropic/results', 'response_status_code': status,
+               'response': {'error': {'type': 'not_found_error'}}}
+    pk = FakePortkey({(WINDOW_START, WINDOW_END): [pending, _portkey_row('real-call')]})
+    outcome = _run(mg, pk, pushes)
+    assert outcome.status == 'completed'
+    assert mg.completed == ['lease-1'] and mg.abandoned == []
+    assert [row['request_id'] for push in pushes for row in push['rows']] == ['real-call']
+
+
+def test_corrupt_successful_batch_results_still_blocks_checkpoint():
+    mg, pushes = FakeMeterGraph(_acquired()), []
+    corrupt = {**_portkey_row('corrupt-download'), 'ai_org': 'anthropic',
+               'ai_model': 'anthropic/results', 'response': 'not-json'}
+    pk = FakePortkey({(WINDOW_START, WINDOW_END): [corrupt]})
+    outcome = _run(mg, pk, pushes)
+    assert outcome.status == 'failed'
+    assert mg.completed == [] and mg.abandoned == ['lease-1']
+
+
 def test_lease_renewer_does_not_renew_before_interval_elapses():
     clock = FakeClock()
     renews = []

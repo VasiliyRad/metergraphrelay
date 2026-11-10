@@ -102,6 +102,23 @@ def test_partial_jsonl_is_not_silently_dropped():
         normalize(export_row(response=json.dumps(result()) + '\nnot-json'))
 
 
+@pytest.mark.parametrize('status', [None, 0, 199, 301, 404, 429, 500])
+def test_unsuccessful_results_fetch_is_transport_not_an_inference(status):
+    assert normalize(export_row(response_status_code=status,
+                                response={'error': {'type': 'not_found_error'}})) == []
+
+
+def test_export_continues_after_a_results_fetch_404(tmp_path):
+    source, dest = tmp_path / 'source.jsonl', tmp_path / 'dest.jsonl'
+    pending = export_row(id='download-not-ready', response_status_code=404,
+                         response={'error': {'type': 'not_found_error'}})
+    source.write_text(json.dumps(pending) + '\n' + json.dumps(export_row()) + '\n')
+    count, skipped = portkey.convert_portkey_export(str(source), str(dest))
+    assert count == 1 and skipped == 0
+    row, = [json.loads(line) for line in dest.read_text().splitlines()]
+    assert row['model'] == 'claude-sonnet-4-6'
+
+
 @pytest.mark.parametrize('outcome', ['errored', 'canceled', 'expired'])
 def test_failed_result_is_explicit_and_not_a_success(outcome):
     envelope = {'custom_id': 'custom-example', 'result': {'type': outcome}}

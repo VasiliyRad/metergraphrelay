@@ -12,8 +12,9 @@ can price its native usage with the catalog's batch rates.
 
 The additive `normalize_portkey_rows(row, *, import_context=None,
 batch_requests=None)` API returns a list. Ordinary rows produce one record and
-keep the existing `normalize_portkey_row` behavior. Management operations produce
-none. Invalid recognized results raise `PortkeyConversionError` so a recurring
+keep the existing `normalize_portkey_row` behavior. Management operations and
+unsuccessful results fetches produce none. Invalid results in a successful 2xx
+response raise `PortkeyConversionError` so a recurring
 import cannot complete a window after silently discarding results.
 
 Successful results use `anthropic-batch:<message.id>` as their request and import
