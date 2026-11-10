@@ -548,6 +548,41 @@ def normalize_portkey_row(
     return capture_row(result)
 
 
+def normalize_portkey_rows(
+    row: dict, *, import_context: ImportContext | None = None,
+    batch_requests: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Normalize one export row to zero or more individual inference outcomes.
+
+    Ordinary rows keep the singular converter's contract. Batch management is
+    excluded; result messages use native usage and stable per-message identity.
+    The optional request map must belong to this batch, keyed by custom_id.
+    """
+    from .portkey_batch import BatchShapeError, expand_batch
+
+    try:
+        children = expand_batch(row, batch_requests=batch_requests)
+    except BatchShapeError as exc:
+        raise PortkeyConversionError(str(exc)) from None
+    if children is None:
+        return [normalize_portkey_row(row, import_context=import_context)]
+    results = []
+    for child in children:
+        result = normalize_portkey_row(child, import_context=import_context)
+        if child.get('request') is None:
+            result.pop('request_json', None)
+        result['batch'] = True
+        result['endpoint'] = 'messages'
+        result['batch_custom_id'] = child['batch_custom_id']
+        result['batch_outcome'] = child['batch_outcome']
+        result['portkey_export_id'] = row.get('id')
+        # These describe a whole download, not an individual model completion.
+        for key in ('cost_usd', 'reported_cost_usd', 'reported_cost_source', 'latency_ms'):
+            result.pop(key, None)
+        results.append(result)
+    return results
+
+
 def convert_portkey_export(
     input_path: str,
     output_path: str,
@@ -582,8 +617,8 @@ def convert_portkey_export(
                 )
                 continue
             try:
-                normalized = normalize_portkey_row(row, import_context=import_context)
-                serialized = json.dumps(normalized)
+                normalized_rows = normalize_portkey_rows(row, import_context=import_context)
+                serialized_rows = [json.dumps(normalized) for normalized in normalized_rows]
             except (KeyError, TypeError, AttributeError) as exc:
                 skipped += 1
                 row_id = (
@@ -594,6 +629,7 @@ def convert_portkey_export(
                     file=sys.stderr,
                 )
                 continue
-            dst.write(serialized + "\n")
-            converted += 1
+            for serialized in serialized_rows:
+                dst.write(serialized + "\n")
+                converted += 1
     return converted, skipped
