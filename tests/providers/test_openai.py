@@ -34,6 +34,9 @@ def test_normalize_completion_with_content_included():
     )
 
     assert row == {
+        "http_status_code": None,
+        "availability": None,
+        "refused": None,
         "ts": "2026-05-28T20:26:40+00:00",
         "provider": "openai",
         "model": "gpt-4o-mini",

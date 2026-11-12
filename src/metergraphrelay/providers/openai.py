@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from itertools import islice
 from typing import Any, Iterable
 
+from ..reliability import reliability_fields
 from .. import __version__
 from ..capture_contract import capture_response_text, capture_row, capture_tool_calls
 
@@ -93,6 +94,7 @@ def normalize_completion(
             )
 
     return capture_row({
+        **reliability_fields(provider="openai", response=completion),
         "ts": ts,
         "provider": "openai",
         "model": completion.model,

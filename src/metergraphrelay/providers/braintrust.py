@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
+from ..reliability import reliability_fields
 from .. import __version__
 from ..http_limits import ResponseTooLarge, read_bounded
 from ..billing_evidence import reported_cost
@@ -545,6 +546,8 @@ def normalize_span(
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(span.get("id"))
+    row.update(reliability_fields(provider=row.get("provider"), response=span.get("output"),
+        error=raw_error if isinstance(raw_error, dict) else None, http_status_code=None, finish_reason=stop_reason))
     return capture_row(row)
 
 

@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
+from ..reliability import reliability_fields
 from .. import __version__
 from .cache_shape import CACHE_EXCLUSIVE_INPUT_PROVIDERS
 from ..http_limits import ResponseTooLarge, read_bounded
@@ -472,6 +473,8 @@ def normalize_observation(
         row["import_source"] = import_context.source
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(observation.get("id"))
+    row.update(reliability_fields(provider=provider, response=observation.get("output"),
+        error=None, http_status_code=None, finish_reason=stop_reason))
     return capture_row(row)
 
 
