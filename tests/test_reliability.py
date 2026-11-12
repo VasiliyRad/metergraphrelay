@@ -72,8 +72,9 @@ def test_all_import_adapters_preserve_explicit_refusal():
                 'kwargs':{'content':'','additional_kwargs':{'refusal':'policy'}}}}]]}},route_override=None),
         braintrust_span({'id':'span-1','created':'2026-11-01T00:00:00Z','metrics':{},
             'output':[{'role':'assistant','content':None,'refusal':'policy'}]},route_override=None),
-        phoenix_span({'id':'span-1','start_time':'2026-11-01T00:00:00Z',
-            'attributes':{'gen_ai.response.finish_reasons':['stop', 'content_filter']}},project='synthetic',route_override=None),
+        phoenix_span({'id':'span-1','start_time':'2026-11-01T00:00:00Z', 'status_code':'ERROR',
+            'attributes':{'gen_ai.response.finish_reasons':['stop', 'content_filter'],
+                          'error.type':'provider_policy_block'}},project='synthetic',route_override=None),
         normalize_completion(NS(created=1,id='completion-1',model='example-model',
             choices=[NS(finish_reason='stop',message=NS(content=None,refusal='policy'))]), [],
             route='synthetic',include_content=False),
@@ -81,3 +82,6 @@ def test_all_import_adapters_preserve_explicit_refusal():
     for row in rows:
         assert row['availability'] == 'available'
         assert row['refused'] is True
+
+    assert rows[-2]['error_type'] == 'provider_policy_block'
+    assert rows[-2]['otel']['finish_reasons'] == ['stop', 'content_filter']

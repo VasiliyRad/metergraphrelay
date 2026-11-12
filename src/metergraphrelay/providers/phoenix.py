@@ -361,6 +361,10 @@ def normalize_span(
         else None
     )
 
+    reported_error = attributes.get("error.type")
+    if error and isinstance(reported_error, str) and reported_error:
+        error_type = reported_error
+
     request_json, request_text = _map_input(attributes)
     stop_reason = extract_phoenix_stop_reason(attributes)
     context = span.get("context")
@@ -400,6 +404,9 @@ def normalize_span(
     }
     if stop_reason is not None:
         row["stop_reason"] = stop_reason
+    reasons = attributes.get("gen_ai.response.finish_reasons")
+    if isinstance(reasons, (list, tuple)) and all(isinstance(reason, str) for reason in reasons):
+        row["otel"] = {"finish_reasons": list(reasons)}
     if import_context is not None:
         # The OpenTelemetry span id is stable across re-reads of the same
         # span, so an overlap re-pull deduplicates on the server.
