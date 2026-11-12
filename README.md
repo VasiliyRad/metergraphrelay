@@ -679,3 +679,9 @@ The standalone classifier is copied from Metergraph Core. Run
 `python3 scripts/sync_reliability.py /path/to/metergraph [--check]` to update or
 check it and the shared synthetic conformance fixtures. The copied classifier
 is Apache-2.0 licensed; see `licenses/metergraph-core-Apache-2.0.txt`.
+
+Phoenix imports pass OpenTelemetry HTTP/error attributes and the full
+`gen_ai.response.finish_reasons` array, or OpenInference `llm.finish_reason`,
+to the same classifier. A refusal in any returned choice marks the recorded
+call as refused. Generic operation errors stay separate from these derived
+outcomes; no physical retry count is inferred from imported logical spans.

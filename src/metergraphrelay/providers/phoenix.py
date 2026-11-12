@@ -407,7 +407,7 @@ def normalize_span(
         row["import_source_scope"] = import_context.source_scope
         row["import_event_id"] = canonical_import_event_id(span_id)
     row.update(reliability_fields(provider=row.get("provider"), response=None,
-        error=None, http_status_code=attributes.get("http.response.status_code") or attributes.get("http.status_code"), finish_reason=stop_reason))
+        error=None, attributes=attributes, finish_reason=stop_reason))
     return capture_row(row)
 
 

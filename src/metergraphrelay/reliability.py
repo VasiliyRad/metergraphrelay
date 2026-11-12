@@ -41,7 +41,8 @@ def _native_response(value: Any) -> Any:
 
 def reliability_fields(*, provider: str | None = None, response: Any = None,
                        error: Any = None, http_status_code: Any = None,
-                       finish_reason: str | None = None) -> dict:
+                       finish_reason: str | None = None,
+                       attributes: dict | None = None) -> dict:
     return asdict(classify_model_reliability(provider=provider,
         response=_native_response(response), error=error,
-        http_status_code=http_status_code, finish_reason=finish_reason))
+        http_status_code=http_status_code, finish_reason=finish_reason, attributes=attributes))
