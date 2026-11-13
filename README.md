@@ -678,7 +678,7 @@ refusals. Import identity, cost, tokens and latency are unchanged.
 The standalone classifier is copied from Metergraph Core. Run
 `python3 scripts/sync_reliability.py /path/to/metergraph [--check]` to update or
 check it and the shared synthetic conformance fixtures. The copied classifier
-is Apache-2.0 licensed; see `licenses/metergraph-core-Apache-2.0.txt`.
+is Apache-2.0 licensed; see `LICENSE`.
 
 Phoenix imports pass OpenTelemetry HTTP/error attributes and the full
 `gen_ai.response.finish_reasons` array, or OpenInference `llm.finish_reason`,
