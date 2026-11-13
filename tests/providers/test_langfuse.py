@@ -727,6 +727,10 @@ def test_normalize_observation_full_row():
     row = normalize_observation(observation, route_override=None)
 
     assert row == {
+        "http_status_code": None,
+        "error_code": None,
+        "refusal_signal": None,
+        "response_received": None,
         "ts": "2026-08-07T12:00:00+00:00",
         "source": "langfuse",
         "sdk": "metergraphrelay",

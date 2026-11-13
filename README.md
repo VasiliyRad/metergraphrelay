@@ -666,3 +666,9 @@ query itself is accepted — add:
 
 That live section is skipped whenever `BRAINTRUST_E2E_PROJECT` is unset, and
 never runs in CI.
+
+## Model reliability evidence
+
+Relay extracts provider status, error codes, finish reasons and explicit refusal
+signals before content conversion. Metergraph receivers use Core to classify
+availability and refusals; Relay does not depend on Core or classify outcomes.

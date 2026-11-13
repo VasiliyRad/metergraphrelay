@@ -9,6 +9,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from ..reliability import reliability_fields
 from .. import __version__
 from ..billing_evidence import reported_cost
 from ..capture_contract import capture_row, capture_text, capture_tool_calls
@@ -545,6 +546,8 @@ def normalize_portkey_row(
         result["import_source"] = import_context.source
         result["import_source_scope"] = import_context.source_scope
         result["import_event_id"] = import_event_id  # validated, stripped id
+    result.update(reliability_fields(provider=row.get("ai_org"), response=response,
+        error=response.get("error") if is_error else None, http_status_code=status_code, finish_reason=stop_reason))
     return capture_row(result)
 
 

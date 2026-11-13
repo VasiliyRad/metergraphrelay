@@ -105,3 +105,26 @@ def extract_phoenix_stop_reason(attributes: Mapping[str, Any]) -> str | None:
             if reason is not None:
                 return reason
     return None
+
+
+def extract_finish_reasons(value: Any, *, _depth: int = 0) -> list[str]:
+    """Preserve all reasons in documented export containers for the receiver."""
+    if _depth > _MAX_DEPTH:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [reason for item in value for reason in extract_finish_reasons(item, _depth=_depth + 1)]
+    if not isinstance(value, Mapping):
+        return []
+    result = []
+    for key in _REASON_KEYS + ('finish_reasons', 'finishReasons'):
+        raw = value.get(key)
+        for item in raw if isinstance(raw, (list, tuple)) else (raw,):
+            reason = _string_reason(item)
+            if reason is not None:
+                result.append(reason)
+    incomplete = value.get('incomplete_details')
+    if isinstance(incomplete, Mapping) and _string_reason(incomplete.get('reason')):
+        result.append(incomplete['reason'])
+    for key in ('choices', 'candidates') + tuple(key for key in _REASON_CONTAINER_KEYS if key != 'incomplete_details'):
+        result.extend(extract_finish_reasons(value.get(key), _depth=_depth + 1))
+    return result
