@@ -667,21 +667,8 @@ query itself is accepted — add:
 That live section is skipped whenever `BRAINTRUST_E2E_PROJECT` is unset, and
 never runs in CI.
 
-## Model reliability fields
+## Model reliability evidence
 
-Supported imports emit nullable `http_status_code`, `availability` and `refused`
-fields alongside existing call records. Structural provider refusals and policy
-blocks count as available responses; HTTP 429 and provider 5xx count as
-unavailable. Sparse exports retain unknown outcomes rather than implying zero
-refusals. Import identity, cost, tokens and latency are unchanged.
-
-The standalone classifier is copied from Metergraph Core. Run
-`python3 scripts/sync_reliability.py /path/to/metergraph [--check]` to update or
-check it and the shared synthetic conformance fixtures. The copied classifier
-is Apache-2.0 licensed; see `LICENSE`.
-
-Phoenix imports pass OpenTelemetry HTTP/error attributes and the full
-`gen_ai.response.finish_reasons` array, or OpenInference `llm.finish_reason`,
-to the same classifier. A refusal in any returned choice marks the recorded
-call as refused. Generic operation errors stay separate from these derived
-outcomes; no physical retry count is inferred from imported logical spans.
+Relay extracts provider status, error codes, finish reasons and explicit refusal
+signals before content conversion. Metergraph receivers use Core to classify
+availability and refusals; Relay does not depend on Core or classify outcomes.
